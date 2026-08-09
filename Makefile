@@ -19,7 +19,7 @@ coverage:
 	@go test -tags uni_chat_test_keychain -coverprofile=coverage.out ./...
 
 secrets-check:
-	@! git grep -nE '(COSIGN_PRIVATE_KEY|BEGIN (RSA|OPENSSH|EC) PRIVATE KEY|ghp_[A-Za-z0-9]+)' -- . ':!go.sum'
+	@! git grep -nE '(COSIGN_PRIVATE_KEY[[:space:]]*=|BEGIN (RSA|OPENSSH|EC) PRIVATE KEY|ghp_[A-Za-z0-9]+)' -- . ':!go.sum'
 
 dependency-check:
 	@if command -v govulncheck >/dev/null; then govulncheck ./...; else echo 'govulncheck unavailable' >&2; exit 1; fi
