@@ -8,10 +8,12 @@ ARCHIVE := $(DIST)/uni-chat-sdk-$(VERSION).tar.gz
 LOCAL_RELEASE_DIR := $(DIST)/local-release/$(VERSION)
 LOCAL_RELEASE_ARCHIVE := $(LOCAL_RELEASE_DIR)/uni-chat-sdk-$(VERSION).tar.gz
 
-.PHONY: format lint vet test race coverage secrets-check dependency-check check check-local-tag package-local install-local verify-local-install install-local-smoke release-local
+.PHONY: format fmt lint vet test test-unit race coverage secrets-check dependency-check security check check-local-tag package-local install-local verify-local-install install-local-smoke release-local local-release
 
 format:
 	@test -z "$$(gofmt -l $$(go list -f '{{.Dir}}' ./...))"
+
+fmt: format
 
 lint:
 	@if command -v staticcheck >/dev/null; then staticcheck ./...; else echo 'staticcheck is required for lint' >&2; exit 1; fi
@@ -21,6 +23,8 @@ vet:
 
 test:
 	@go test -tags uni_chat_test_keychain -count=1 ./...
+
+test-unit: test
 
 race:
 	@go test -tags uni_chat_test_keychain -race -count=1 ./...
@@ -33,6 +37,8 @@ secrets-check:
 
 dependency-check:
 	@if command -v govulncheck >/dev/null; then govulncheck ./...; else echo 'govulncheck unavailable' >&2; exit 1; fi
+
+security: secrets-check dependency-check
 
 check-local-tag:
 	@test -z "$$(git status --porcelain --untracked-files=all)" || { printf '%s\n' 'check-local-tag requires a clean tree' >&2; exit 1; }
@@ -61,5 +67,7 @@ install-local-smoke: check-local-tag
 
 release-local: check-local-tag
 	@set -eu; release_dir="$(LOCAL_RELEASE_DIR)"; archive="$(LOCAL_RELEASE_ARCHIVE)"; mkdir -p "$$release_dir"; git archive --format=tar.gz --prefix="uni-chat-sdk-$(VERSION)/" "$(TAG)" -o "$$archive"; (cd "$$release_dir" && shasum -a 256 "$$(basename "$$archive")" > SHA256SUMS); sha256=$$(cut -d ' ' -f 1 "$$release_dir/SHA256SUMS"); commit=$$(git rev-parse "$(TAG)^{commit}"); printf '{\n  "version": "$(VERSION)",\n  "tag": "$(TAG)",\n  "commit": "%s",\n  "archive": "%s",\n  "sha256": "%s"\n}\n' "$$commit" "$$(basename "$$archive")" "$$sha256" > "$$release_dir/metadata.json"; git show "$(TAG):CHANGELOG.md" > "$$release_dir/RELEASE_NOTES.md"; printf 'Local release written to %s\n' "$$release_dir"
+
+local-release: release-local
 
 check: format lint vet test race coverage secrets-check dependency-check
