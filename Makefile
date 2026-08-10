@@ -1,4 +1,12 @@
-.PHONY: format lint vet test race coverage secrets-check dependency-check check
+SHELL := /bin/sh
+
+VERSION ?= $(shell tag=$$(git describe --exact-match --tags HEAD 2>/dev/null) && printf '%s' "$$tag" | sed 's/^v//' || printf '%s' dev)
+TAG ?= v$(VERSION)
+PREFIX ?= $(HOME)/.local
+DIST ?= dist
+ARCHIVE := $(DIST)/uni-chat-sdk-$(VERSION).tar.gz
+
+.PHONY: format lint vet test race coverage secrets-check dependency-check check check-local-tag package-local install-local verify-local-install install-local-smoke
 
 format:
 	@test -z "$$(gofmt -l $$(go list -f '{{.Dir}}' ./...))"
@@ -23,5 +31,30 @@ secrets-check:
 
 dependency-check:
 	@if command -v govulncheck >/dev/null; then govulncheck ./...; else echo 'govulncheck unavailable' >&2; exit 1; fi
+
+check-local-tag:
+	@test -z "$$(git status --porcelain --untracked-files=all)" || { printf '%s\n' 'check-local-tag requires a clean tree' >&2; exit 1; }
+	@test "$(VERSION)" != dev -a "$(VERSION)" != "" || { printf '%s\n' 'VERSION must be canonical SemVer from an exact tag' >&2; exit 1; }
+	@test "$(TAG)" = "v$(VERSION)" || { printf '%s\n' 'TAG must be the exact canonical tag v$(VERSION)' >&2; exit 1; }
+	@test "$$(git describe --exact-match --tags HEAD 2>/dev/null || true)" = "$(TAG)" || { printf '%s\n' 'HEAD must be the exact canonical local tag' >&2; exit 1; }
+	@test "$$(git rev-parse --verify "$(TAG)^{commit}")" = "$$(git rev-parse HEAD)"
+
+package-local:
+	@mkdir -p "$(DIST)"
+	@tar --exclude='./.git' --exclude='./$(DIST)' -czf "$(ARCHIVE)" .
+	@test -s "$(ARCHIVE)"
+
+install-local: package-local
+	@rm -rf "$(PREFIX)/share/uni-chat-sdk/$(VERSION)"
+	@mkdir -p "$(PREFIX)/share/uni-chat-sdk/$(VERSION)"
+	@tar -xzf "$(ARCHIVE)" -C "$(PREFIX)/share/uni-chat-sdk/$(VERSION)"
+
+verify-local-install:
+	@test -f "$(PREFIX)/share/uni-chat-sdk/$(VERSION)/go.mod"
+	@test -d "$(PREFIX)/share/uni-chat-sdk/$(VERSION)/pkg"
+	@test -d "$(PREFIX)/share/uni-chat-sdk/$(VERSION)/state"
+
+install-local-smoke: check-local-tag
+	@prefix=$$(mktemp -d); dist=$$(mktemp -d); trap 'rm -rf "$$prefix" "$$dist"' EXIT; $(MAKE) --no-print-directory package-local DIST="$$dist" VERSION="$(VERSION)" TAG="$(TAG)"; $(MAKE) --no-print-directory install-local PREFIX="$$prefix" DIST="$$dist" VERSION="$(VERSION)" TAG="$(TAG)"; $(MAKE) --no-print-directory verify-local-install PREFIX="$$prefix" VERSION="$(VERSION)"
 
 check: format lint vet test race coverage secrets-check dependency-check
