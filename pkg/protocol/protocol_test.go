@@ -2,6 +2,7 @@ package protocol
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"net"
@@ -9,6 +10,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -337,6 +339,120 @@ func TestServeSurvivesTransientAcceptError(t *testing.T) {
 	}
 }
 
+func TestServeReturnsBusyWhenConnectionLimitIsReached(t *testing.T) {
+	sock := filepath.Join(shortSocketDir(t), "d.sock")
+	ln, err := Listen(sock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = ln.Close() }()
+	entered := make(chan struct{}, serveMaxConcurrentConnections)
+	release := make(chan struct{})
+	go Serve(ln, func(req Request) Response {
+		entered <- struct{}{}
+		<-release
+		return OK(nil)
+	})
+	var wg sync.WaitGroup
+	for i := 0; i < serveMaxConcurrentConnections; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_, _ = Call(sock, Request{Cmd: "hold"}, 5*time.Second)
+		}()
+	}
+	for i := 0; i < serveMaxConcurrentConnections; i++ {
+		select {
+		case <-entered:
+		case <-time.After(5 * time.Second):
+			t.Fatal("connection slot was not occupied")
+		}
+	}
+	resp, err := Call(sock, Request{Cmd: "busy"}, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.OK || resp.Error != ErrServerBusy.Error() {
+		t.Fatalf("busy response = %+v, want failed server busy response", resp)
+	}
+	close(release)
+	wg.Wait()
+}
+
+func TestServeBusyUnreadClientDoesNotBlockAcceptLoop(t *testing.T) {
+	sock := filepath.Join(shortSocketDir(t), "d.sock")
+	ln, err := Listen(sock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = ln.Close() }()
+	entered := make(chan struct{}, serveMaxConcurrentConnections)
+	release := make(chan struct{})
+	go Serve(ln, func(Request) Response { entered <- struct{}{}; <-release; return OK(nil) })
+	clients := make([]net.Conn, 0, serveMaxConcurrentConnections)
+	for i := 0; i < serveMaxConcurrentConnections; i++ {
+		conn, err := net.Dial("unix", sock)
+		if err != nil {
+			t.Fatal(err)
+		}
+		clients = append(clients, conn)
+		if _, err := conn.Write([]byte(`{"cmd":"hold"}` + "\n")); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for i := 0; i < serveMaxConcurrentConnections; i++ {
+		select {
+		case <-entered:
+		case <-time.After(5 * time.Second):
+			t.Fatal("connection slot was not occupied")
+		}
+	}
+	busy, err := net.Dial("unix", sock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = busy.Close() }()
+	if _, err := busy.Write([]byte(`{"cmd":"busy"}` + "\n")); err != nil {
+		t.Fatal(err)
+	}
+	next, err := net.DialTimeout("unix", sock, time.Second)
+	if err != nil {
+		t.Fatalf("accept loop blocked behind unread busy client: %v", err)
+	}
+	_ = next.Close()
+	close(release)
+	for _, conn := range clients {
+		_ = conn.Close()
+	}
+}
+
+func TestServeContextReturnsAfterShutdownDeadline(t *testing.T) {
+	sock := filepath.Join(shortSocketDir(t), "d.sock")
+	ln, err := Listen(sock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	started := make(chan struct{})
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		ServeContext(ctx, ln, func(Request) Response { close(started); time.Sleep(serveShutdownTimeout * 2); return OK(nil) })
+		close(done)
+	}()
+	go func() { _, _ = Call(sock, Request{Cmd: "slow"}, time.Second) }()
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("handler did not start")
+	}
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(serveShutdownTimeout + time.Second):
+		t.Fatal("Serve did not return after shutdown deadline")
+	}
+}
+
 // --- stdio transport (ядро↔адаптер) ---
 
 func TestServeStdioOneShot(t *testing.T) {
@@ -379,6 +495,84 @@ func TestServeStdioBadRequestStillReplies(t *testing.T) {
 	}
 	if resp.OK || resp.Error == "" {
 		t.Fatalf("want {ok:false} with an error, got %+v", resp)
+	}
+}
+
+func TestServeStdioRejectsOversizedRequest(t *testing.T) {
+	var out bytes.Buffer
+	input := strings.NewReader(`{"cmd":"` + strings.Repeat("x", maxRequestJSONBytes) + `"}`)
+	if err := ServeStdio(input, &out, func(Request) Response { return OK(nil) }); err != nil {
+		t.Fatal(err)
+	}
+	var resp Response
+	if err := json.Unmarshal(out.Bytes(), &resp); err != nil {
+		t.Fatal(err)
+	}
+	if resp.OK || !strings.Contains(resp.Error, "exceeds") {
+		t.Fatalf("response = %+v, want bounded-input failure", resp)
+	}
+}
+
+func TestServeStdioRejectsValidJSONWithOversizedTrailingData(t *testing.T) {
+	var out bytes.Buffer
+	called := false
+	input := strings.NewReader(`{"cmd":"ping"}` + strings.Repeat("x", maxRequestJSONBytes))
+	if err := ServeStdio(input, &out, func(Request) Response { called = true; return OK(nil) }); err != nil {
+		t.Fatal(err)
+	}
+	var resp Response
+	if err := json.Unmarshal(out.Bytes(), &resp); err != nil {
+		t.Fatal(err)
+	}
+	if resp.OK || called {
+		t.Fatalf("response=%+v handler_called=%t", resp, called)
+	}
+}
+
+func TestServeRejectsOversizedSocketRequest(t *testing.T) {
+	sock := filepath.Join(shortSocketDir(t), "d.sock")
+	ln, err := Listen(sock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = ln.Close() }()
+	var called atomic.Bool
+	go Serve(ln, func(Request) Response { called.Store(true); return OK(nil) })
+	conn, err := net.Dial("unix", sock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = conn.Close() }()
+	if _, err := conn.Write([]byte(`{"cmd":"` + strings.Repeat("x", maxRequestJSONBytes) + `"}`)); err != nil {
+		t.Fatal(err)
+	}
+	var resp Response
+	if err := json.NewDecoder(conn).Decode(&resp); err != nil {
+		t.Fatal(err)
+	}
+	if resp.OK || resp.Error == "" || called.Load() {
+		t.Fatalf("response = %+v handler_called=%t, want bounded-input failure", resp, called.Load())
+	}
+}
+
+func TestServeRejectsValidJSONWithOversizedSocketTrailingData(t *testing.T) {
+	sock := filepath.Join(shortSocketDir(t), "d.sock")
+	ln, err := Listen(sock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = ln.Close() }()
+	var called atomic.Bool
+	go Serve(ln, func(Request) Response { called.Store(true); return OK(nil) })
+	conn, err := net.Dial("unix", sock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = conn.Close() }()
+	_, _ = conn.Write([]byte(`{"cmd":"ping"}` + strings.Repeat("x", maxRequestJSONBytes)))
+	_ = conn.Close()
+	if called.Load() {
+		t.Fatal("handler was called for a request with oversized trailing data")
 	}
 }
 

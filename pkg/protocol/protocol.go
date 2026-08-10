@@ -16,6 +16,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -665,6 +666,10 @@ func Fail(err error) Response { return Response{OK: false, Error: err.Error()} }
 // of hanging.
 var ErrDaemonUnreachable = errors.New("uni-chatd is not running")
 
+// ErrServerBusy is returned as a normal failed response when all connection
+// slots are occupied. Keeping this in the response preserves the wire contract.
+var ErrServerBusy = errors.New("server busy")
+
 // Call dials the socket, sends one request, reads one response. A dial failure
 // (no listener) is returned wrapped in ErrDaemonUnreachable — fast, never a
 // hang. timeout bounds the response read (generous: check may retry upstream).
@@ -717,6 +722,39 @@ type Handler func(Request) Response
 // path for a truly dead listener, instead of a stray error silently ending
 // the accept loop while the process stays alive and serves nothing.
 func Serve(ln net.Listener, h Handler) {
+	ServeContext(context.Background(), ln, h)
+}
+
+// ServeContext accepts connections until the listener closes or ctx is
+// cancelled. Cancellation closes active sockets and gives handlers a bounded
+// opportunity to finish persistence before Serve returns.
+func ServeContext(ctx context.Context, ln net.Listener, h Handler) {
+	sem := make(chan struct{}, serveMaxConcurrentConnections)
+	var wg sync.WaitGroup
+	var activeMu sync.Mutex
+	active := map[net.Conn]struct{}{}
+	shutdown := make(chan struct{})
+	go func() {
+		select {
+		case <-ctx.Done():
+			_ = ln.Close()
+		case <-shutdown:
+		}
+	}()
+	defer func() {
+		close(shutdown)
+		activeMu.Lock()
+		for conn := range active {
+			_ = conn.Close()
+		}
+		activeMu.Unlock()
+		wait := make(chan struct{})
+		go func() { wg.Wait(); close(wait) }()
+		select {
+		case <-wait:
+		case <-time.After(serveShutdownTimeout):
+		}
+	}()
 	for {
 		conn, err := ln.Accept()
 		if err != nil {
@@ -726,12 +764,34 @@ func Serve(ln net.Listener, h Handler) {
 			time.Sleep(5 * time.Millisecond) // avoid a tight spin on a persistent error
 			continue
 		}
-		go serveConn(conn, h)
+		select {
+		case sem <- struct{}{}:
+			activeMu.Lock()
+			active[conn] = struct{}{}
+			activeMu.Unlock()
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				defer func() { <-sem }()
+				defer func() {
+					activeMu.Lock()
+					delete(active, conn)
+					activeMu.Unlock()
+				}()
+				serveConn(conn, h)
+			}()
+		default:
+			go writeBusyResponse(conn)
+		}
 	}
 }
 
 const (
+	serveMaxConcurrentConnections  = 32
+	maxRequestJSONBytes            = 1 << 20
 	serveConnectionTimeout         = 120 * time.Second
+	serveShutdownTimeout           = 5 * time.Second
+	serveBusyWriteTimeout          = 100 * time.Millisecond
 	SyncServeTimeout               = 11 * time.Minute
 	deleteRangeSummaryServeTimeout = 11 * time.Minute
 	DeleteJobStartTimeout          = 12 * time.Minute
@@ -751,16 +811,73 @@ func serveConnectionTimeoutFor(cmd string) time.Duration {
 	return serveConnectionTimeout
 }
 
+func writeBusyResponse(conn net.Conn) {
+	defer func() { _ = conn.Close() }()
+	_ = conn.SetWriteDeadline(time.Now().Add(serveBusyWriteTimeout))
+	_ = json.NewEncoder(conn).Encode(Fail(ErrServerBusy))
+}
+
 func serveConn(conn net.Conn, h Handler) {
 	defer func() { _ = conn.Close() }()
 	_ = conn.SetDeadline(time.Now().Add(serveConnectionTimeout))
 	var req Request
-	if err := json.NewDecoder(conn).Decode(&req); err != nil {
+	if err := decodeBoundedRequest(conn, &req); err != nil {
 		_ = json.NewEncoder(conn).Encode(Fail(errors.New("bad request")))
 		return
 	}
 	_ = conn.SetDeadline(time.Now().Add(serveConnectionTimeoutFor(req.Cmd)))
 	_ = json.NewEncoder(conn).Encode(callHandler(h, req))
+}
+
+func decodeBoundedRequest(in io.Reader, req *Request) error {
+	limited := &io.LimitedReader{R: in, N: maxRequestJSONBytes + 1}
+	decoder := json.NewDecoder(limited)
+	if err := decoder.Decode(req); err != nil {
+		if limited.N == 0 {
+			return fmt.Errorf("request JSON exceeds %d bytes", maxRequestJSONBytes)
+		}
+		return err
+	}
+	if decoder.InputOffset() > maxRequestJSONBytes {
+		return fmt.Errorf("request JSON exceeds %d bytes", maxRequestJSONBytes)
+	}
+	trailing := decoder.Buffered()
+	if hasNonWhitespace(trailing) {
+		return fmt.Errorf("request JSON exceeds %d bytes or contains trailing data", maxRequestJSONBytes)
+	}
+	if conn, ok := in.(net.Conn); ok {
+		return rejectSocketTrailingData(conn)
+	}
+	remaining, err := io.ReadAll(limited)
+	if err != nil {
+		return err
+	}
+	if hasNonWhitespace(bytes.NewReader(remaining)) {
+		return fmt.Errorf("request JSON exceeds %d bytes or contains trailing data", maxRequestJSONBytes)
+	}
+	return nil
+}
+
+func hasNonWhitespace(in io.Reader) bool {
+	data, err := io.ReadAll(in)
+	return err == nil && len(bytes.TrimSpace(data)) != 0
+}
+
+func rejectSocketTrailingData(conn net.Conn) error {
+	_ = conn.SetReadDeadline(time.Now().Add(10 * time.Millisecond))
+	var one [1]byte
+	for {
+		n, err := conn.Read(one[:])
+		if n > 0 && !bytes.Contains([]byte(" \t\r\n"), one[:1]) {
+			return fmt.Errorf("request JSON exceeds %d bytes or contains trailing data", maxRequestJSONBytes)
+		}
+		if err != nil {
+			if ne, ok := err.(net.Error); ok && ne.Timeout() {
+				return nil
+			}
+			return err
+		}
+	}
 }
 
 // callHandler runs h(req), converting a panic into a Fail response instead of
@@ -826,7 +943,7 @@ type CapabilitiesData struct {
 // {ok:false} Response rather than a silent failure.
 func ServeStdio(in io.Reader, out io.Writer, h Handler) error {
 	var req Request
-	if err := json.NewDecoder(in).Decode(&req); err != nil {
+	if err := decodeBoundedRequest(in, &req); err != nil {
 		return json.NewEncoder(out).Encode(Fail(fmt.Errorf("bad request: %w", err)))
 	}
 	return json.NewEncoder(out).Encode(callHandler(h, req))
