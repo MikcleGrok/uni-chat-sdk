@@ -5,8 +5,10 @@ TAG ?= v$(VERSION)
 PREFIX ?= $(HOME)/.local
 DIST ?= dist
 ARCHIVE := $(DIST)/uni-chat-sdk-$(VERSION).tar.gz
+LOCAL_RELEASE_DIR := $(DIST)/local-release/$(VERSION)
+LOCAL_RELEASE_ARCHIVE := $(LOCAL_RELEASE_DIR)/uni-chat-sdk-$(VERSION).tar.gz
 
-.PHONY: format lint vet test race coverage secrets-check dependency-check check check-local-tag package-local install-local verify-local-install install-local-smoke
+.PHONY: format lint vet test race coverage secrets-check dependency-check check check-local-tag package-local install-local verify-local-install install-local-smoke release-local
 
 format:
 	@test -z "$$(gofmt -l $$(go list -f '{{.Dir}}' ./...))"
@@ -56,5 +58,8 @@ verify-local-install:
 
 install-local-smoke: check-local-tag
 	@prefix=$$(mktemp -d); dist=$$(mktemp -d); trap 'rm -rf "$$prefix" "$$dist"' EXIT; $(MAKE) --no-print-directory package-local DIST="$$dist" VERSION="$(VERSION)" TAG="$(TAG)"; $(MAKE) --no-print-directory install-local PREFIX="$$prefix" DIST="$$dist" VERSION="$(VERSION)" TAG="$(TAG)"; $(MAKE) --no-print-directory verify-local-install PREFIX="$$prefix" VERSION="$(VERSION)"
+
+release-local: check-local-tag
+	@set -eu; release_dir="$(LOCAL_RELEASE_DIR)"; archive="$(LOCAL_RELEASE_ARCHIVE)"; mkdir -p "$$release_dir"; git archive --format=tar.gz --prefix="uni-chat-sdk-$(VERSION)/" "$(TAG)" -o "$$archive"; (cd "$$release_dir" && shasum -a 256 "$$(basename "$$archive")" > SHA256SUMS); sha256=$$(cut -d ' ' -f 1 "$$release_dir/SHA256SUMS"); commit=$$(git rev-parse "$(TAG)^{commit}"); printf '{\n  "version": "$(VERSION)",\n  "tag": "$(TAG)",\n  "commit": "%s",\n  "archive": "%s",\n  "sha256": "%s"\n}\n' "$$commit" "$$(basename "$$archive")" "$$sha256" > "$$release_dir/metadata.json"; git show "$(TAG):CHANGELOG.md" > "$$release_dir/RELEASE_NOTES.md"; printf 'Local release written to %s\n' "$$release_dir"
 
 check: format lint vet test race coverage secrets-check dependency-check
