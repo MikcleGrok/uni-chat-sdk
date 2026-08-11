@@ -453,6 +453,130 @@ func TestServeContextReturnsAfterShutdownDeadline(t *testing.T) {
 	}
 }
 
+type trackingListener struct {
+	net.Listener
+	accepted *atomic.Int32
+	closed   *atomic.Int32
+	signal   chan struct{}
+}
+
+func (l *trackingListener) Accept() (net.Conn, error) {
+	conn, err := l.Listener.Accept()
+	if err != nil {
+		return nil, err
+	}
+	l.accepted.Add(1)
+	return &trackingConn{Conn: conn, closed: l.closed, signal: l.signal}, nil
+}
+
+type trackingConn struct {
+	net.Conn
+	closed *atomic.Int32
+	signal chan struct{}
+	once   sync.Once
+}
+
+func (c *trackingConn) Close() error {
+	c.once.Do(func() {
+		c.closed.Add(1)
+		if c.signal != nil {
+			close(c.signal)
+		}
+	})
+	return c.Conn.Close()
+}
+
+func TestServeContextRepeatedLifecycleClosesEveryAcceptedConnection(t *testing.T) {
+	sock := filepath.Join(shortSocketDir(t), "d.sock")
+	const cycles = 8
+	var accepted, closed atomic.Int32
+	for i := 0; i < cycles; i++ {
+		realLn, err := Listen(sock)
+		if err != nil {
+			t.Fatal(err)
+		}
+		ln := &trackingListener{Listener: realLn, accepted: &accepted, closed: &closed}
+		ctx, cancel := context.WithCancel(context.Background())
+		done := make(chan struct{})
+		go func() {
+			ServeContext(ctx, ln, func(Request) Response { return OK(nil) })
+			close(done)
+		}()
+		if _, err := Call(sock, Request{Cmd: "ping"}, time.Second); err != nil {
+			cancel()
+			_ = ln.Close()
+			t.Fatal(err)
+		}
+		cancel()
+		select {
+		case <-done:
+		case <-time.After(time.Second):
+			_ = ln.Close()
+			t.Fatalf("lifecycle %d did not shut down", i)
+		}
+	}
+	if accepted.Load() != cycles {
+		t.Fatalf("accepted connections = %d, want %d", accepted.Load(), cycles)
+	}
+	if closed.Load() != accepted.Load() {
+		t.Fatalf("closed server connections = %d, want %d", closed.Load(), accepted.Load())
+	}
+}
+
+func TestServeContextCancellationClosesActiveConnection(t *testing.T) {
+	sock := filepath.Join(shortSocketDir(t), "d.sock")
+	realLn, err := Listen(sock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var closed atomic.Int32
+	closedSignal := make(chan struct{})
+	ln := &trackingListener{Listener: realLn, accepted: new(atomic.Int32), closed: &closed, signal: closedSignal}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	started := make(chan struct{})
+	release := make(chan struct{})
+	done := make(chan struct{})
+	go func() {
+		ServeContext(ctx, ln, func(Request) Response {
+			close(started)
+			<-release
+			return OK(nil)
+		})
+		close(done)
+	}()
+	conn, err := net.Dial("unix", sock)
+	if err != nil {
+		_ = ln.Close()
+		t.Fatal(err)
+	}
+	if err := json.NewEncoder(conn).Encode(Request{Cmd: "hold"}); err != nil {
+		_ = conn.Close()
+		_ = ln.Close()
+		t.Fatal(err)
+	}
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		_ = conn.Close()
+		_ = ln.Close()
+		t.Fatal("handler did not start")
+	}
+	cancel()
+	select {
+	case <-closedSignal:
+	case <-time.After(time.Second):
+		t.Fatal("shutdown did not close the active connection")
+	}
+	close(release)
+	_ = conn.Close()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("ServeContext did not finish after handler release")
+	}
+}
+
 // --- stdio transport (ядро↔адаптер) ---
 
 func TestServeStdioOneShot(t *testing.T) {
