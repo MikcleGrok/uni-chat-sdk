@@ -45,7 +45,7 @@ func SetToken(account, token string) error {
 	if ok, err := setTestToken(account, token); ok {
 		return err
 	}
-	if _, err := runWithInput(token+"\n", "add-generic-password", "-s", Service, "-a", account, "-U", "-w"); err != nil {
+	if _, err := runWithInput(token+"\n"+token+"\n", "add-generic-password", "-s", Service, "-a", account, "-U", "-w"); err != nil {
 		return fmt.Errorf("keychain write (service=%s account=%s): %w", Service, account, err)
 	}
 	return nil

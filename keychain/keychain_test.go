@@ -58,7 +58,7 @@ func TestSetToken(t *testing.T) {
 	if !strings.Contains(joined, "add-generic-password") || !strings.Contains(joined, "-U") || !strings.Contains(joined, "-w") || strings.Contains(joined, "abc123") || !strings.Contains(joined, "mattermost-token") {
 		t.Fatalf("args = %v", gotArgs)
 	}
-	if gotInput != "abc123\n" {
-		t.Fatalf("stdin = %q, want token followed by newline", gotInput)
+	if gotInput != "abc123\nabc123\n" {
+		t.Fatalf("stdin = %q, want token repeated with a newline", gotInput)
 	}
 }
