@@ -2,17 +2,19 @@ package keychain
 
 import (
 	"errors"
-	"strings"
+	"os"
+	"path/filepath"
 	"testing"
 )
 
 func TestGetToken(t *testing.T) {
-	var gotArgs []string
-	orig := run
-	defer func() { run = orig }()
-	run = func(args ...string) ([]byte, error) {
-		gotArgs = args
-		return []byte("s3cr3t\n"), nil
+	orig := platformGetToken
+	defer func() { platformGetToken = orig }()
+	platformGetToken = func(service, account string) (string, error) {
+		if service != Service || account != "mattermost-token" {
+			t.Fatalf("boundary = (%q, %q)", service, account)
+		}
+		return "s3cr3t\n", nil
 	}
 
 	tok, err := GetToken("mattermost-token")
@@ -22,16 +24,12 @@ func TestGetToken(t *testing.T) {
 	if tok != "s3cr3t" {
 		t.Fatalf("token = %q, want trimmed s3cr3t", tok)
 	}
-	joined := strings.Join(gotArgs, " ")
-	if !strings.Contains(joined, "find-generic-password") || !strings.Contains(joined, Service) || !strings.Contains(joined, "mattermost-token") {
-		t.Fatalf("args = %v", gotArgs)
-	}
 }
 
 func TestGetTokenMissing(t *testing.T) {
-	orig := run
-	defer func() { run = orig }()
-	run = func(args ...string) ([]byte, error) { return nil, errors.New("SecKeychainSearchCopyNext: not found") }
+	orig := platformGetToken
+	defer func() { platformGetToken = orig }()
+	platformGetToken = func(string, string) (string, error) { return "", errors.New("not found") }
 
 	if _, err := GetToken("mattermost-token"); err == nil {
 		t.Fatal("want error when the token is absent")
@@ -39,26 +37,36 @@ func TestGetTokenMissing(t *testing.T) {
 }
 
 func TestSetToken(t *testing.T) {
-	var gotArgs []string
-	var gotInput string
-	orig := run
-	origInput := runWithInput
-	defer func() { run = orig }()
-	defer func() { runWithInput = origInput }()
-	runWithInput = func(input string, args ...string) ([]byte, error) {
-		gotArgs = args
-		gotInput = input
-		return nil, nil
+	orig := platformSetToken
+	defer func() { platformSetToken = orig }()
+	var gotService, gotAccount, gotToken string
+	platformSetToken = func(service, account, token string) error {
+		gotService, gotAccount, gotToken = service, account, token
+		return nil
 	}
 
 	if err := SetToken("mattermost-token", "abc123"); err != nil {
 		t.Fatal(err)
 	}
-	joined := strings.Join(gotArgs, " ")
-	if !strings.Contains(joined, "add-generic-password") || !strings.Contains(joined, "-U") || !strings.Contains(joined, "-w") || strings.Contains(joined, "abc123") || !strings.Contains(joined, "mattermost-token") {
-		t.Fatalf("args = %v", gotArgs)
+	if gotService != Service || gotAccount != "mattermost-token" || gotToken != "abc123" {
+		t.Fatalf("boundary = (%q, %q, %q)", gotService, gotAccount, gotToken)
 	}
-	if gotInput != "abc123\nabc123\n" {
-		t.Fatalf("stdin = %q, want token repeated with a newline", gotInput)
+}
+
+func TestTestKeychainRoundTrip(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "keychain.json")
+	t.Setenv("UNI_CHAT_TEST_KEYCHAIN", path)
+	if err := SetToken("mattermost-token", "abc123"); err != nil {
+		t.Fatal(err)
+	}
+	tok, err := GetToken("mattermost-token")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tok != "abc123" {
+		t.Fatalf("token = %q, want abc123", tok)
+	}
+	if _, err := os.Stat(path); err != nil {
+		t.Fatal(err)
 	}
 }
