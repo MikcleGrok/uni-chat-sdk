@@ -1,5 +1,9 @@
 # Changelog
 
+## [0.1.10]
+
+- В `PostData` добавлены поля `channel_id` и `post_id`.
+
 ## [0.1.9]
 
 - Заменён вызов macOS `security` CLI на нативный `Security.framework` для чтения и записи токенов Keychain.
