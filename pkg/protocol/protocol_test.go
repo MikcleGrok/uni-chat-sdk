@@ -1235,3 +1235,26 @@ func TestSendArgsRootPostIDIsOptionalAndRoundTrips(t *testing.T) {
 		t.Fatalf("encoded = %s, want no root_post_id key for a top-level reply", b)
 	}
 }
+
+func TestPostDataRoundTripsOptionalIdentifiers(t *testing.T) {
+	want := PostData{Permalink: "https://mm.example/pl/p1", ChannelID: "c1", PostID: "p1"}
+	raw, err := json.Marshal(want)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got PostData
+	if err := json.Unmarshal(raw, &got); err != nil {
+		t.Fatal(err)
+	}
+	if got != want {
+		t.Fatalf("post data = %+v, want %+v", got, want)
+	}
+	legacy := []byte(`{"permalink":"https://mm.example/pl/legacy"}`)
+	var old PostData
+	if err := json.Unmarshal(legacy, &old); err != nil {
+		t.Fatal(err)
+	}
+	if old.Permalink == "" || old.ChannelID != "" || old.PostID != "" {
+		t.Fatalf("legacy post data = %+v", old)
+	}
+}

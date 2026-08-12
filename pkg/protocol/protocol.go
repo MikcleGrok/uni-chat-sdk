@@ -132,6 +132,8 @@ type PostArgs struct {
 }
 type PostData struct {
 	Permalink string `json:"permalink"`
+	ChannelID string `json:"channel_id,omitempty"`
+	PostID    string `json:"post_id,omitempty"`
 }
 
 // WatchArgs / WatchListData back the "watch_*" commands.
