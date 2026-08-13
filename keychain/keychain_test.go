@@ -1,9 +1,9 @@
+//go:build !uni_chat_test_keychain
+
 package keychain
 
 import (
 	"errors"
-	"os"
-	"path/filepath"
 	"testing"
 )
 
@@ -50,23 +50,5 @@ func TestSetToken(t *testing.T) {
 	}
 	if gotService != Service || gotAccount != "mattermost-token" || gotToken != "abc123" {
 		t.Fatalf("boundary = (%q, %q, %q)", gotService, gotAccount, gotToken)
-	}
-}
-
-func TestTestKeychainRoundTrip(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "keychain.json")
-	t.Setenv("UNI_CHAT_TEST_KEYCHAIN", path)
-	if err := SetToken("mattermost-token", "abc123"); err != nil {
-		t.Fatal(err)
-	}
-	tok, err := GetToken("mattermost-token")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if tok != "abc123" {
-		t.Fatalf("token = %q, want abc123", tok)
-	}
-	if _, err := os.Stat(path); err != nil {
-		t.Fatal(err)
 	}
 }

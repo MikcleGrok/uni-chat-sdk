@@ -11,7 +11,7 @@ import (
 func testToken(account string) (string, bool, error) {
 	path := os.Getenv("UNI_CHAT_TEST_KEYCHAIN")
 	if path == "" {
-		return "", false, nil
+		return "", true, fmt.Errorf("test keychain is disabled: UNI_CHAT_TEST_KEYCHAIN must point to a disposable file")
 	}
 	b, err := os.ReadFile(path)
 	if err != nil {
@@ -31,7 +31,7 @@ func testToken(account string) (string, bool, error) {
 func setTestToken(account, token string) (bool, error) {
 	path := os.Getenv("UNI_CHAT_TEST_KEYCHAIN")
 	if path == "" {
-		return false, nil
+		return true, fmt.Errorf("test keychain is disabled: UNI_CHAT_TEST_KEYCHAIN must point to a disposable file")
 	}
 	tokens := map[string]string{}
 	if b, err := os.ReadFile(path); err == nil {

@@ -3,6 +3,12 @@ SHELL := /bin/sh
 VERSION ?= $(shell tag=$$(git describe --exact-match --tags HEAD 2>/dev/null) && printf '%s' "$$tag" | sed 's/^v//' || printf '%s' dev)
 TAG ?= v$(VERSION)
 PREFIX ?= $(HOME)/.local
+CLAUDE_SCRIPTS_DIR ?= $(HOME)/.claude/scripts
+GO_TEST_WRAPPER := $(CLAUDE_SCRIPTS_DIR)/go-test.sh
+GO_VET_WRAPPER := $(CLAUDE_SCRIPTS_DIR)/go-vet.sh
+GOFMT_WRAPPER := $(CLAUDE_SCRIPTS_DIR)/gofmt-check.sh
+GO_TEST_CMD := $(if $(wildcard $(GO_TEST_WRAPPER)),"$(GO_TEST_WRAPPER)",go) $(if $(wildcard $(GO_TEST_WRAPPER)),,test)
+GO_VET_CMD := $(if $(wildcard $(GO_VET_WRAPPER)),"$(GO_VET_WRAPPER)",go) $(if $(wildcard $(GO_VET_WRAPPER)),,vet)
 DIST ?= dist
 ARCHIVE := $(DIST)/uni-chat-sdk-$(VERSION).tar.gz
 LOCAL_RELEASE_DIR := $(DIST)/local-release/$(VERSION)
@@ -11,7 +17,7 @@ LOCAL_RELEASE_ARCHIVE := $(LOCAL_RELEASE_DIR)/uni-chat-sdk-$(VERSION).tar.gz
 .PHONY: format fmt lint vet test test-unit race coverage secrets-check dependency-check security check check-local-tag package-local install-local verify-local-install install-local-smoke release-local local-release
 
 format:
-	@test -z "$$(gofmt -l $$(go list -f '{{.Dir}}' ./...))"
+	@tmp=$$(mktemp -d); trap 'rm -rf "$$tmp"' EXIT HUP INT TERM; export HOME="$$tmp/home"; if test -x "$(GOFMT_WRAPPER)"; then "$(GOFMT_WRAPPER)" -C . -novcs; else test -z "$$(gofmt -l $$(go list -f '{{.Dir}}' ./...))"; fi
 
 fmt: format
 
@@ -19,18 +25,18 @@ lint:
 	@if command -v staticcheck >/dev/null; then staticcheck ./...; else echo 'staticcheck is required for lint' >&2; exit 1; fi
 
 vet:
-	@go vet ./...
+	@tmp=$$(mktemp -d); trap 'rm -rf "$$tmp"' EXIT HUP INT TERM; mkdir -p "$$tmp/home"; HOME="$$tmp/home" $(GO_VET_CMD) -C . ./...
 
 test:
-	@go test -tags uni_chat_test_keychain -count=1 ./...
+	@tmp=$$(mktemp -d); trap 'rm -rf "$$tmp"' EXIT HUP INT TERM; mkdir -p "$$tmp/home"; printf '%s\n' '{}' > "$$tmp/keychain.json"; HOME="$$tmp/home" UNI_CHAT_TEST_KEYCHAIN="$$tmp/keychain.json" $(GO_TEST_CMD) -C . -tags uni_chat_test_keychain ./...
 
 test-unit: test
 
 race:
-	@go test -tags uni_chat_test_keychain -race -count=1 ./...
+	@tmp=$$(mktemp -d); trap 'rm -rf "$$tmp"' EXIT HUP INT TERM; mkdir -p "$$tmp/home"; printf '%s\n' '{}' > "$$tmp/keychain.json"; HOME="$$tmp/home" UNI_CHAT_TEST_KEYCHAIN="$$tmp/keychain.json" $(GO_TEST_CMD) -C . -tags uni_chat_test_keychain -race ./...
 
 coverage:
-	@go test -tags uni_chat_test_keychain -coverprofile=coverage.out ./...
+	@tmp=$$(mktemp -d); trap 'rm -rf "$$tmp"' EXIT HUP INT TERM; mkdir -p "$$tmp/home"; printf '%s\n' '{}' > "$$tmp/keychain.json"; HOME="$$tmp/home" UNI_CHAT_TEST_KEYCHAIN="$$tmp/keychain.json" $(GO_TEST_CMD) -C . -tags uni_chat_test_keychain -coverprofile="$$tmp/coverage.out" ./...
 
 secrets-check:
 	@! git grep -nE '(COSIGN_PRIVATE_KEY[[:space:]]*=|BEGIN (RSA|OPENSSH|EC) PRIVATE KEY|ghp_[A-Za-z0-9]+)' -- . ':!go.sum'
