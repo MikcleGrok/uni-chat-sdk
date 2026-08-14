@@ -964,12 +964,13 @@ func CallStdio(bin string, args []string, req Request, timeout time.Duration) (R
 	if err != nil {
 		return Response{}, err
 	}
-	cmd := exec.CommandContext(ctx, bin, args...) // #nosec G204 -- the engine binary is selected from the private registry.
+	cmd := exec.Command(bin, args...) // #nosec G204 -- the engine binary is selected from the private registry.
 	cmd.Stdin = bytes.NewReader(reqBytes)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
-	if err := cmd.Run(); err != nil {
+	configureProcessGroup(cmd)
+	if err := runBoundedCommand(ctx, cmd, timeout); err != nil {
 		return Response{}, fmt.Errorf("engine %s: %w: %s", bin, err, strings.TrimSpace(stderr.String()))
 	}
 	var resp Response
