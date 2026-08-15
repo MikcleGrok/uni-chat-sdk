@@ -725,9 +725,16 @@ func TestEngineHelperProcess(t *testing.T) {
 
 func TestCallStdioTimeoutKillsSlowChild(t *testing.T) {
 	t.Setenv(engineHelperEnv, "1")
+	started := time.Now()
 	_, err := CallStdio(os.Args[0], []string{"-test.run=^TestEngineHelperProcess$"}, Request{Cmd: "sleep"}, 20*time.Millisecond)
 	if err == nil {
 		t.Fatal("slow engine must be stopped when its bounded context expires")
+	}
+	if !strings.Contains(err.Error(), "engine timeout after 20ms") || !strings.Contains(err.Error(), "SIGTERM") {
+		t.Fatalf("timeout error = %v, want actionable signal diagnostic", err)
+	}
+	if elapsed := time.Since(started); elapsed > time.Second {
+		t.Fatalf("timed out engine cleanup took %v, want bounded cleanup", elapsed)
 	}
 }
 
