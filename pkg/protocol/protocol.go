@@ -129,6 +129,10 @@ type AckArgs struct {
 type PostArgs struct {
 	Channel string `json:"channel"`
 	Text    string `json:"text"`
+	// RootPostID makes this a reply inside an existing thread instead of a new
+	// top-level message. Empty is the ordinary channel post, which is what the
+	// CLI's "post" verb sends when --thread is not given.
+	RootPostID string `json:"root_post_id,omitempty"`
 }
 type PostData struct {
 	Permalink string `json:"permalink"`
@@ -337,8 +341,9 @@ type SendArgs struct {
 	ChannelID string `json:"channel_id"`
 	Text      string `json:"text"`
 	// RootPostID makes this a reply inside an existing thread instead of a new
-	// top-level message. Empty is the ordinary channel reply, which is what the
-	// CLI's "post" verb always sends. Like every post id it crosses the daemon
+	// top-level message. Empty is the ordinary channel reply. The CLI's "post"
+	// verb carries the same field (PostArgs.RootPostID) and sends it non-empty
+	// when --thread is given. Like every post id it crosses the daemon
 	// unprefixed.
 	RootPostID string `json:"root_post_id,omitempty"`
 }
