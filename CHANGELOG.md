@@ -20,4 +20,5 @@
 
 ## Unreleased
 
+- В `PostArgs` добавлено опциональное поле `RootPostID` (`root_post_id`) — ответ в тред вместо нового сообщения верхнего уровня; при пустом значении поведение и wire-формат не меняются.
 - Initial local extraction from `uni-chat`.

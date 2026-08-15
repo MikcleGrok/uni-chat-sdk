@@ -1258,3 +1258,32 @@ func TestPostDataRoundTripsOptionalIdentifiers(t *testing.T) {
 		t.Fatalf("legacy post data = %+v", old)
 	}
 }
+
+// TestPostArgsRootPostIDIsOptionalAndRoundTrips proves a reply into a thread
+// is an additive request shape for "post" too: without it the wire form is
+// exactly the old {channel, text}.
+func TestPostArgsRootPostIDIsOptionalAndRoundTrips(t *testing.T) {
+	in := PostArgs{Channel: "mattermost/c9", Text: "on it", RootPostID: "p2"}
+	b, err := json.Marshal(in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(b), `"root_post_id":"p2"`) {
+		t.Fatalf("encoded = %s, want a root_post_id field", b)
+	}
+	var out PostArgs
+	if err := json.Unmarshal(b, &out); err != nil {
+		t.Fatal(err)
+	}
+	if out != in {
+		t.Fatalf("round trip = %+v, want %+v", out, in)
+	}
+
+	b, err = json.Marshal(PostArgs{Channel: "mattermost/c9", Text: "on it"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(b), "root_post_id") {
+		t.Fatalf("encoded = %s, want no root_post_id key for a top-level post", b)
+	}
+}
