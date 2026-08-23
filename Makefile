@@ -22,7 +22,7 @@ format:
 fmt: format
 
 lint:
-	@if command -v staticcheck >/dev/null; then staticcheck ./...; else echo 'staticcheck is required for lint' >&2; exit 1; fi
+	@go tool staticcheck ./...
 
 vet:
 	@tmp=$$(mktemp -d); trap 'rm -rf "$$tmp"' EXIT HUP INT TERM; mkdir -p "$$tmp/home"; HOME="$$tmp/home" $(GO_VET_CMD) -C . ./...
