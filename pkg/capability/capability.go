@@ -7,18 +7,19 @@ import "fmt"
 type ID string
 
 const (
-	ChannelsList        ID = "channels.list"
-	MessagesHistory     ID = "messages.history"
-	MessagesSearch      ID = "messages.search"
-	MessagesSend        ID = "messages.send"
-	MessagesReact       ID = "messages.react"
-	MessagesDelete      ID = "messages.delete"
-	MessagesDeleteRange ID = "messages.delete_range"
-	ChannelsWatch       ID = "channels.watch"
-	NotificationsCheck  ID = "notifications.check"
+	ChannelsList              ID = "channels.list"
+	MessagesHistory           ID = "messages.history"
+	MessagesSearch            ID = "messages.search"
+	MessagesSend              ID = "messages.send"
+	MessagesReact             ID = "messages.react"
+	MessagesDelete            ID = "messages.delete"
+	MessagesDeleteRange       ID = "messages.delete_range"
+	ChannelsWatch             ID = "channels.watch"
+	NotificationsCheck        ID = "notifications.check"
+	NotificationsCheckCursors ID = "notifications.check_cursors"
 )
 
-var IDs = []ID{ChannelsList, MessagesHistory, MessagesSearch, MessagesSend, MessagesReact, MessagesDelete, MessagesDeleteRange, ChannelsWatch, NotificationsCheck}
+var IDs = []ID{ChannelsList, MessagesHistory, MessagesSearch, MessagesSend, MessagesReact, MessagesDelete, MessagesDeleteRange, ChannelsWatch, NotificationsCheck, NotificationsCheckCursors}
 
 type Status string
 
@@ -70,7 +71,7 @@ func Label(id ID) string {
 	return map[ID]string{
 		ChannelsList: "List channels", MessagesHistory: "Read message history", MessagesSearch: "Search messages",
 		MessagesSend: "Send messages", MessagesReact: "React to messages", MessagesDelete: "Delete messages",
-		MessagesDeleteRange: "Delete message ranges", ChannelsWatch: "Watch channels", NotificationsCheck: "Check notifications",
+		MessagesDeleteRange: "Delete message ranges", ChannelsWatch: "Watch channels", NotificationsCheck: "Check notifications", NotificationsCheckCursors: "Check notifications with cursors",
 	}[id]
 }
 
@@ -78,7 +79,7 @@ func Action(id ID) string {
 	return map[ID]string{
 		ChannelsList: "channels.list", MessagesHistory: "messages.history", MessagesSearch: "messages.search",
 		MessagesSend: "messages.send", MessagesReact: "messages.react", MessagesDelete: "messages.delete",
-		MessagesDeleteRange: "messages.delete_range", ChannelsWatch: "channels.watch", NotificationsCheck: "notifications.check",
+		MessagesDeleteRange: "messages.delete_range", ChannelsWatch: "channels.watch", NotificationsCheck: "notifications.check", NotificationsCheckCursors: "notifications.check_cursors",
 	}[id]
 }
 
