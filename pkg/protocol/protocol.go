@@ -100,6 +100,11 @@ type CheckArgs struct {
 	Refresh    bool `json:"refresh,omitempty"`
 }
 
+type CheckCursorsArgs struct {
+	Cursors    map[string]string `json:"cursors"`
+	IncludeOwn bool              `json:"include_own,omitempty"`
+}
+
 // SyncError identifies an engine- or channel-scoped read failure. Empty
 // ChannelID/ChannelRef means the error prevented the engine from listing its
 // channels or authenticating.

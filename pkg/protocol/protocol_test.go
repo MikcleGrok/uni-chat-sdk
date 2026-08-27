@@ -1158,6 +1158,20 @@ func TestCheckArgsRefreshAndSyncDataWireContract(t *testing.T) {
 	}
 }
 
+func TestCheckCursorsArgsWireContract(t *testing.T) {
+	b := MarshalArgs(CheckCursorsArgs{Cursors: map[string]string{"channel-1": "native-9"}})
+	if string(b) != `{"cursors":{"channel-1":"native-9"}}` {
+		t.Fatalf("cursor check args = %s", b)
+	}
+	var args CheckCursorsArgs
+	if err := json.Unmarshal(b, &args); err != nil {
+		t.Fatal(err)
+	}
+	if args.Cursors["channel-1"] != "native-9" || args.IncludeOwn {
+		t.Fatalf("decoded = %+v", args)
+	}
+}
+
 func TestSendRoundTrip(t *testing.T) {
 	args := SendArgs{ChannelID: "mattermost/c1", Text: "deploying now"}
 	b, err := json.Marshal(args)
