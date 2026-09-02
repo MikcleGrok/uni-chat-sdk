@@ -1228,6 +1228,33 @@ func TestReactRoundTrip(t *testing.T) {
 	}
 }
 
+func TestEditRoundTrip(t *testing.T) {
+	args := EditArgs{ChannelID: "mattermost/c1", PostID: "p1", Text: "corrected text"}
+	b, err := json.Marshal(args)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var gotArgs EditArgs
+	if err := json.Unmarshal(b, &gotArgs); err != nil {
+		t.Fatal(err)
+	}
+	if gotArgs != args {
+		t.Fatalf("args round trip = %+v, want %+v", gotArgs, args)
+	}
+	data := EditData{Permalink: "https://mattermost.example/team/pl/p1", PostID: "p1"}
+	b, err = json.Marshal(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var gotData EditData
+	if err := json.Unmarshal(b, &gotData); err != nil {
+		t.Fatal(err)
+	}
+	if gotData != data {
+		t.Fatalf("data round trip = %+v, want %+v", gotData, data)
+	}
+}
+
 // TestSendArgsRootPostIDIsOptionalAndRoundTrips proves a reply into a thread is
 // an additive request shape: without it the wire form is exactly the old
 // {channel_id, text}.

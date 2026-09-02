@@ -375,6 +375,22 @@ type ReactData struct {
 	Emoji  string `json:"emoji"`
 }
 
+// EditArgs replaces the text of one post in place. PostID alone does not say
+// which engine owns it, so the caller supplies either an engine-prefixed
+// ChannelID or the bare Engine name.
+type EditArgs struct {
+	ChannelID string `json:"channel_id,omitempty"`
+	Engine    string `json:"engine,omitempty"`
+	PostID    string `json:"post_id"`
+	Text      string `json:"text"`
+}
+
+// EditData is the platform-neutral result of editing a post.
+type EditData struct {
+	Permalink string `json:"permalink"`
+	PostID    string `json:"post_id"`
+}
+
 // DeleteArgs removes one post for the legacy TUI path. PostID alone does not
 // say which engine owns it, so the caller supplies either an engine-prefixed
 // ChannelID or the bare Engine name.
