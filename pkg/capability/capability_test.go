@@ -16,6 +16,25 @@ func TestStaticAndRuntimeStatuses(t *testing.T) {
 	}
 }
 
+func TestMessagesEditIsWiredIn(t *testing.T) {
+	found := false
+	for _, id := range IDs {
+		if id == MessagesEdit {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("MessagesEdit missing from IDs = %+v", IDs)
+	}
+	if Label(MessagesEdit) == "" {
+		t.Fatal("Label(MessagesEdit) is empty")
+	}
+	if Action(MessagesEdit) != "messages.edit" {
+		t.Fatalf("Action(MessagesEdit) = %q, want %q", Action(MessagesEdit), "messages.edit")
+	}
+}
+
 func TestUnavailableErrorIsTyped(t *testing.T) {
 	err := &UnavailableError{ID: MessagesSend, Status: Restricted, Reason: ReasonAPIKeyRestricted}
 	var target *UnavailableError
