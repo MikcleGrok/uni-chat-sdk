@@ -115,6 +115,7 @@ check-local-tag: ## Assert HEAD is the exact canonical local tag on a clean tree
 	@test "$(VERSION)" != dev -a "$(VERSION)" != "" || { printf '%s\n' 'VERSION must be canonical SemVer from an exact tag' >&2; exit 1; }
 	@test "$(TAG)" = "v$(VERSION)" || { printf '%s\n' 'TAG must be the exact canonical tag v$(VERSION)' >&2; exit 1; }
 	@test "$$(git describe --exact-match --tags HEAD 2>/dev/null || true)" = "$(TAG)" || { printf '%s\n' 'HEAD must be the exact canonical local tag' >&2; exit 1; }
+	@test "$$(git cat-file -t "$(TAG)" 2>/dev/null || true)" = tag || { printf '%s\n' '$(TAG) must be an annotated tag, not a lightweight one' >&2; exit 1; }
 	@test "$$(git rev-parse --verify "$(TAG)^{commit}")" = "$$(git rev-parse HEAD)"
 
 package-local: ## Build the local source archive into the DIST directory
