@@ -25,7 +25,7 @@ ARCHIVE := $(DIST)/uni-chat-sdk-$(VERSION).tar.gz
 LOCAL_RELEASE_DIR := $(DIST)/local-release/$(VERSION)
 LOCAL_RELEASE_ARCHIVE := $(LOCAL_RELEASE_DIR)/uni-chat-sdk-$(VERSION).tar.gz
 
-.PHONY: help setup check-env format fmt lint vet build test test-unit test-acceptance race coverage secrets-check dependency-check security version check-version release-check check check-local-tag package-local install-local verify-local-install install-local-smoke release-local local-release
+.PHONY: help setup check-env format fmt lint vet build test test-unit test-acceptance race coverage secrets-check dependency-check security version check-version release-check check check-local-tag package-local install-local verify-local-install install-scoping-test install-local-smoke release-local local-release
 
 help: ## Show this help: every target with its purpose
 	@printf 'uni-chat-sdk — make targets\n\n'
@@ -107,7 +107,7 @@ release-check: ## Pre-tag release completeness gate on the candidate commit (mak
 	@$(MAKE) --no-print-directory check-version
 	@if git rev-parse --verify --quiet 'refs/tags/$(TAG)' >/dev/null; then test "$$(git rev-parse '$(TAG)^{commit}')" = "$$(git rev-parse HEAD)" || { printf '%s\n' 'release-check: planned tag $(TAG) already exists on a different commit' >&2; exit 1; }; fi
 	@grep -q '^## \[$(VERSION)\]' CHANGELOG.md || { printf '%s\n' 'release-check: CHANGELOG.md has no "## [$(VERSION)]" section' >&2; exit 1; }
-	@$(MAKE) --no-print-directory check-env format lint vet build test test-acceptance race secrets-check dependency-check
+	@$(MAKE) --no-print-directory check-env format lint vet build test test-acceptance race secrets-check dependency-check install-scoping-test
 	@printf 'release-check OK: candidate %s, planned tag %s, normalized version %s\n' "$$(git rev-parse HEAD)" '$(TAG)' '$(VERSION)'
 
 check-local-tag: ## Assert HEAD is the exact canonical local tag on a clean tree
@@ -133,6 +133,9 @@ verify-local-install: ## Assert the installed version subtree carries the expect
 	@test -d "$(PREFIX)/share/uni-chat-sdk/$(VERSION)/pkg"
 	@test -d "$(PREFIX)/share/uni-chat-sdk/$(VERSION)/state"
 
+install-scoping-test: ## Prove install-local never touches unrelated files in a shared PREFIX
+	@MAKE='$(MAKE)' VERSION='$(VERSION)' TAG='$(TAG)' bash scripts/install-prefix-isolation-test.sh
+
 install-local-smoke: check-local-tag ## Package and install the exact tag into a disposable PREFIX and verify it
 	@prefix=$$(mktemp -d); dist=$$(mktemp -d); trap 'rm -rf "$$prefix" "$$dist"' EXIT; $(MAKE) --no-print-directory package-local DIST="$$dist" VERSION="$(VERSION)" TAG="$(TAG)"; $(MAKE) --no-print-directory install-local PREFIX="$$prefix" DIST="$$dist" VERSION="$(VERSION)" TAG="$(TAG)"; $(MAKE) --no-print-directory verify-local-install PREFIX="$$prefix" VERSION="$(VERSION)"
 
@@ -141,4 +144,4 @@ release-local: check-local-tag ## Write the offline release bundle for the exact
 
 local-release: release-local ## Alias for release-local
 
-check: check-env check-version format lint vet build test test-acceptance race coverage secrets-check dependency-check ## Run every local gate
+check: check-env check-version format lint vet build test test-acceptance race coverage secrets-check dependency-check install-scoping-test ## Run every local gate
