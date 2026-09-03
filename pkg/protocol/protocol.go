@@ -204,27 +204,45 @@ type ChannelsData struct {
 // PostArgs.Channel already is — the CLI's own entry point into history, which
 // (unlike the TUI) never already holds an id.
 type HistoryArgs struct {
-	ChannelID   string    `json:"channel_id,omitempty"`
-	Channel     string    `json:"channel,omitempty"`
-	Before      string    `json:"before,omitempty"`
-	Limit       int       `json:"limit,omitempty"`
-	SinceTime   time.Time `json:"since_time,omitempty"` // inclusive lower bound
-	UntilTime   time.Time `json:"until_time,omitempty"` // exclusive upper bound
-	MaxPages    int       `json:"max_pages,omitempty"`  // zero is unlimited when present
-	MaxPagesSet bool      `json:"-"`
+	ChannelID string `json:"channel_id,omitempty"`
+	Channel   string `json:"channel,omitempty"`
+	Before    string `json:"before,omitempty"`
+	Limit     int    `json:"limit,omitempty"`
+	// ThreadRootID switches the request from "a page of this channel" to "this
+	// one thread": the post it names plus every reply the platform holds for
+	// it, oldest-first, in a single reply (HasMore=false, no BeforeCursor).
+	//
+	// It exists because a reply loaded from a flat history page can name a root
+	// older than the page itself, and paging back to that root would take an
+	// unbounded number of round trips — while a platform with real threads can
+	// hand the whole thread over in one call. ChannelID (or Channel) is still
+	// required and still says which channel the thread lives in; Before, Limit,
+	// SinceTime, UntilTime and MaxPages do not apply and are ignored.
+	//
+	// It is a post id, so the router relays it verbatim, exactly like
+	// HistoryArgs.Before and PostArgs.RootPostID. An adapter whose platform
+	// cannot serve a thread addressed by its root id must fail the request
+	// rather than quietly answer with an ordinary page — a silent fallback
+	// would look like "this thread has no root" to the caller.
+	ThreadRootID string    `json:"thread_root_id,omitempty"`
+	SinceTime    time.Time `json:"since_time,omitempty"` // inclusive lower bound
+	UntilTime    time.Time `json:"until_time,omitempty"` // exclusive upper bound
+	MaxPages     int       `json:"max_pages,omitempty"`  // zero is unlimited when present
+	MaxPagesSet  bool      `json:"-"`
 }
 
 func (a HistoryArgs) MarshalJSON() ([]byte, error) {
 	type wire struct {
-		ChannelID string     `json:"channel_id,omitempty"`
-		Channel   string     `json:"channel,omitempty"`
-		Before    string     `json:"before,omitempty"`
-		Limit     int        `json:"limit,omitempty"`
-		SinceTime *time.Time `json:"since_time,omitempty"`
-		UntilTime *time.Time `json:"until_time,omitempty"`
-		MaxPages  *int       `json:"max_pages,omitempty"`
+		ChannelID    string     `json:"channel_id,omitempty"`
+		Channel      string     `json:"channel,omitempty"`
+		Before       string     `json:"before,omitempty"`
+		Limit        int        `json:"limit,omitempty"`
+		ThreadRootID string     `json:"thread_root_id,omitempty"`
+		SinceTime    *time.Time `json:"since_time,omitempty"`
+		UntilTime    *time.Time `json:"until_time,omitempty"`
+		MaxPages     *int       `json:"max_pages,omitempty"`
 	}
-	w := wire{ChannelID: a.ChannelID, Channel: a.Channel, Before: a.Before, Limit: a.Limit}
+	w := wire{ChannelID: a.ChannelID, Channel: a.Channel, Before: a.Before, Limit: a.Limit, ThreadRootID: a.ThreadRootID}
 	if !a.SinceTime.IsZero() {
 		w.SinceTime = &a.SinceTime
 	}
@@ -239,19 +257,21 @@ func (a HistoryArgs) MarshalJSON() ([]byte, error) {
 
 func (a *HistoryArgs) UnmarshalJSON(data []byte) error {
 	type wire struct {
-		ChannelID string    `json:"channel_id"`
-		Channel   string    `json:"channel"`
-		Before    string    `json:"before"`
-		Limit     int       `json:"limit"`
-		SinceTime time.Time `json:"since_time"`
-		UntilTime time.Time `json:"until_time"`
-		MaxPages  *int      `json:"max_pages"`
+		ChannelID    string    `json:"channel_id"`
+		Channel      string    `json:"channel"`
+		Before       string    `json:"before"`
+		Limit        int       `json:"limit"`
+		ThreadRootID string    `json:"thread_root_id"`
+		SinceTime    time.Time `json:"since_time"`
+		UntilTime    time.Time `json:"until_time"`
+		MaxPages     *int      `json:"max_pages"`
 	}
 	var w wire
 	if err := json.Unmarshal(data, &w); err != nil {
 		return err
 	}
 	a.ChannelID, a.Channel, a.Before, a.Limit = w.ChannelID, w.Channel, w.Before, w.Limit
+	a.ThreadRootID = w.ThreadRootID
 	a.SinceTime, a.UntilTime = w.SinceTime, w.UntilTime
 	a.MaxPagesSet, a.MaxPages = w.MaxPages != nil, 0
 	if w.MaxPages != nil {

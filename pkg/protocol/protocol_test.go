@@ -1107,6 +1107,40 @@ func TestHistoryArgsChannelIsTheAlternativeToChannelID(t *testing.T) {
 	}
 }
 
+// TestHistoryArgsThreadRootIDIsAdditiveAndRoundTrips pins the whole contract of
+// the thread-context request in one place: the field is absent from the wire
+// unless it is asked for (so an adapter built before it sees byte-for-byte the
+// shape it always saw), it survives HistoryArgs' own hand-written
+// Marshal/Unmarshal pair — which is exactly where a new field silently goes
+// missing, since neither is generated from the struct tags — and it travels
+// alongside ChannelID rather than replacing it, because the thread still has to
+// be looked up inside a channel.
+func TestHistoryArgsThreadRootIDIsAdditiveAndRoundTrips(t *testing.T) {
+	b, err := json.Marshal(HistoryArgs{ChannelID: "mattermost/c1", Before: "p9"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(b), "thread_root_id") {
+		t.Fatalf("encoded = %s, want no thread_root_id key on an ordinary page request", b)
+	}
+
+	b, err = json.Marshal(HistoryArgs{ChannelID: "mattermost/c1", ThreadRootID: "root9"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(b), `"thread_root_id":"root9"`) || !strings.Contains(string(b), `"channel_id":"mattermost/c1"`) {
+		t.Fatalf("encoded = %s, want thread_root_id carried next to channel_id", b)
+	}
+
+	var out HistoryArgs
+	if err := json.Unmarshal(b, &out); err != nil {
+		t.Fatal(err)
+	}
+	if out.ThreadRootID != "root9" || out.ChannelID != "mattermost/c1" {
+		t.Fatalf("decoded = %+v, want ThreadRootID root9 in channel mattermost/c1", out)
+	}
+}
+
 func TestHistoryDataRoundTrip(t *testing.T) {
 	in := HistoryData{
 		Items:        []CheckItem{{PostID: "p1", Kind: "watch", CreatedAt: "2023-11-14T22:13:20Z"}, {PostID: "p2", Kind: "watch"}},
