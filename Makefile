@@ -25,7 +25,7 @@ ARCHIVE := $(DIST)/uni-chat-sdk-$(VERSION).tar.gz
 LOCAL_RELEASE_DIR := $(DIST)/local-release/$(VERSION)
 LOCAL_RELEASE_ARCHIVE := $(LOCAL_RELEASE_DIR)/uni-chat-sdk-$(VERSION).tar.gz
 
-.PHONY: help setup check-env format fmt lint vet build test test-unit test-acceptance race coverage secrets-check dependency-check security version check-version whats-new release-check check check-local-tag package-local install-local verify-local-install install-scoping-test install-local-smoke release-local local-release
+.PHONY: help setup check-env format fmt lint vet build test test-unit test-acceptance race coverage secrets-check dependency-check security version check-version check-onboarding whats-new release-check check check-local-tag package-local install-local verify-local-install install-scoping-test install-local-smoke release-local local-release
 
 help: ## Show this help: every target with its purpose
 	@printf 'uni-chat-sdk — make targets\n\n'
@@ -103,6 +103,9 @@ check-version: ## Validate the single version source (SemVer shape and TAG/VERSI
 		printf 'check-version OK: normalized version %s, tag %s\n' '$(VERSION)' '$(TAG)'; \
 	fi
 
+check-onboarding: ## Validate the README onboarding record (required fields and 90-day freshness)
+	@bash scripts/onboarding-record-check.sh
+
 whats-new: ## Materialize the release notes for VERSION from CHANGELOG.md
 	@notes=$$(awk -v want='## [$(VERSION)]' '$$0 == want { inside = 1; next } /^## /{ inside = 0 } inside' CHANGELOG.md); \
 		test -n "$$(printf '%s' "$$notes" | tr -d '[:space:]')" || { printf '%s\n' 'whats-new: CHANGELOG.md has no non-empty "## [$(VERSION)]" section' >&2; exit 1; }; \
@@ -114,7 +117,7 @@ release-check: ## Pre-tag release completeness gate on the candidate commit (mak
 	@$(MAKE) --no-print-directory check-version
 	@if git rev-parse --verify --quiet 'refs/tags/$(TAG)' >/dev/null; then test "$$(git rev-parse '$(TAG)^{commit}')" = "$$(git rev-parse HEAD)" || { printf '%s\n' 'release-check: planned tag $(TAG) already exists on a different commit' >&2; exit 1; }; fi
 	@$(MAKE) --no-print-directory whats-new >/dev/null || { printf '%s\n' 'release-check: CHANGELOG.md carries no release notes for $(VERSION)' >&2; exit 1; }
-	@$(MAKE) --no-print-directory check-env format lint vet build test test-acceptance race secrets-check dependency-check install-scoping-test
+	@$(MAKE) --no-print-directory check-env check-onboarding format lint vet build test test-acceptance race secrets-check dependency-check install-scoping-test
 	@printf 'release-check OK: candidate %s, planned tag %s, normalized version %s\n' "$$(git rev-parse HEAD)" '$(TAG)' '$(VERSION)'
 
 check-local-tag: ## Assert HEAD is the exact canonical local tag on a clean tree
@@ -151,4 +154,4 @@ release-local: check-local-tag ## Write the offline release bundle for the exact
 
 local-release: release-local ## Alias for release-local
 
-check: check-env check-version format lint vet build test test-acceptance race coverage secrets-check dependency-check install-scoping-test ## Run every local gate
+check: check-env check-version check-onboarding format lint vet build test test-acceptance race coverage secrets-check dependency-check install-scoping-test ## Run every local gate
