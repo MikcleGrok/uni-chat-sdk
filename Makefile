@@ -13,11 +13,19 @@ GOFMT_WRAPPER := $(CLAUDE_SCRIPTS_DIR)/gofmt-check.sh
 GO_TEST_CMD := $(if $(wildcard $(GO_TEST_WRAPPER)),"$(GO_TEST_WRAPPER)",go) $(if $(wildcard $(GO_TEST_WRAPPER)),,test)
 GO_VET_CMD := $(if $(wildcard $(GO_VET_WRAPPER)),"$(GO_VET_WRAPPER)",go) $(if $(wildcard $(GO_VET_WRAPPER)),,vet)
 DIST ?= dist
+# Acceptance stage: the tests that cross a real process boundary — Listen/Dial
+# over a real unix socket and CallStdio over a real exec.Command child. They
+# live next to the code they exercise, so the stage is selected by name rather
+# than by directory; ACCEPTANCE_MIN guards the selector against rotting to a
+# pattern that silently matches nothing.
+ACCEPTANCE_PKG ?= ./pkg/protocol
+ACCEPTANCE_RUN ?= ^Test(Serve|Call)
+ACCEPTANCE_MIN ?= 15
 ARCHIVE := $(DIST)/uni-chat-sdk-$(VERSION).tar.gz
 LOCAL_RELEASE_DIR := $(DIST)/local-release/$(VERSION)
 LOCAL_RELEASE_ARCHIVE := $(LOCAL_RELEASE_DIR)/uni-chat-sdk-$(VERSION).tar.gz
 
-.PHONY: help setup check-env format fmt lint vet build test test-unit race coverage secrets-check dependency-check security version check-version release-check check check-local-tag package-local install-local verify-local-install install-local-smoke release-local local-release
+.PHONY: help setup check-env format fmt lint vet build test test-unit test-acceptance race coverage secrets-check dependency-check security version check-version release-check check check-local-tag package-local install-local verify-local-install install-local-smoke release-local local-release
 
 help: ## Show this help: every target with its purpose
 	@printf 'uni-chat-sdk — make targets\n\n'
@@ -58,6 +66,13 @@ test: ## Run the full package test suite against an isolated HOME and test keych
 
 test-unit: test
 
+test-acceptance: ## Run only the process-boundary suite (real unix sockets, real subprocesses)
+	@tmp=$$(mktemp -d); trap 'rm -rf "$$tmp"' EXIT HUP INT TERM; mkdir -p "$$tmp/home"; printf '%s\n' '{}' > "$$tmp/keychain.json"; \
+		HOME="$$tmp/home" UNI_CHAT_TEST_KEYCHAIN="$$tmp/keychain.json" $(GO_TEST_CMD) -C . -tags uni_chat_test_keychain -count=1 -v -run '$(ACCEPTANCE_RUN)' $(ACCEPTANCE_PKG) > "$$tmp/out" 2>&1 || { cat "$$tmp/out"; exit 1; }; \
+		ran=$$(grep -c '^=== RUN   Test' "$$tmp/out" || true); \
+		test "$$ran" -ge $(ACCEPTANCE_MIN) || { cat "$$tmp/out"; printf 'test-acceptance: selector %s in %s matched %s tests, expected at least %s — the selector has rotted\n' '$(ACCEPTANCE_RUN)' '$(ACCEPTANCE_PKG)' "$$ran" '$(ACCEPTANCE_MIN)' >&2; exit 1; }; \
+		printf 'test-acceptance OK: %s process-boundary tests over real unix sockets and real subprocesses\n' "$$ran"
+
 race: ## Run the test suite under the race detector
 	@tmp=$$(mktemp -d); trap 'rm -rf "$$tmp"' EXIT HUP INT TERM; mkdir -p "$$tmp/home"; printf '%s\n' '{}' > "$$tmp/keychain.json"; HOME="$$tmp/home" UNI_CHAT_TEST_KEYCHAIN="$$tmp/keychain.json" $(GO_TEST_CMD) -C . -tags uni_chat_test_keychain -race ./...
 
@@ -92,7 +107,7 @@ release-check: ## Pre-tag release completeness gate on the candidate commit (mak
 	@$(MAKE) --no-print-directory check-version
 	@if git rev-parse --verify --quiet 'refs/tags/$(TAG)' >/dev/null; then test "$$(git rev-parse '$(TAG)^{commit}')" = "$$(git rev-parse HEAD)" || { printf '%s\n' 'release-check: planned tag $(TAG) already exists on a different commit' >&2; exit 1; }; fi
 	@grep -q '^## \[$(VERSION)\]' CHANGELOG.md || { printf '%s\n' 'release-check: CHANGELOG.md has no "## [$(VERSION)]" section' >&2; exit 1; }
-	@$(MAKE) --no-print-directory check-env format lint vet build test race secrets-check dependency-check
+	@$(MAKE) --no-print-directory check-env format lint vet build test test-acceptance race secrets-check dependency-check
 	@printf 'release-check OK: candidate %s, planned tag %s, normalized version %s\n' "$$(git rev-parse HEAD)" '$(TAG)' '$(VERSION)'
 
 check-local-tag: ## Assert HEAD is the exact canonical local tag on a clean tree
@@ -125,4 +140,4 @@ release-local: check-local-tag ## Write the offline release bundle for the exact
 
 local-release: release-local ## Alias for release-local
 
-check: check-env check-version format lint vet build test race coverage secrets-check dependency-check ## Run every local gate
+check: check-env check-version format lint vet build test test-acceptance race coverage secrets-check dependency-check ## Run every local gate
