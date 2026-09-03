@@ -267,6 +267,10 @@ type HistoryData struct {
 	Items        []CheckItem `json:"items"`
 	HasMore      bool        `json:"has_more"`
 	BeforeCursor string      `json:"before_cursor,omitempty"`
+	// Truncated signals that not all replies/items for a thread in this
+	// response were fetched (an adapter-side page-count cap was hit), so
+	// callers should not treat the response as a complete thread.
+	Truncated bool `json:"truncated,omitempty"`
 }
 
 // SearchArgs asks for posts matching Query in an optional half-open time range.
