@@ -5,6 +5,7 @@
 - Репозиторий приведён в соответствие с `guide-tools`: добавлены недостающие baseline Makefile targets (`setup`, `check-env`, `help`, `build`, `version`, `check-version`, `release-check`), объявлена отдельная acceptance-ступень `test-acceptance`, `check-local-tag` теперь отклоняет lightweight tag, добавлен `whats-new`.
 - Добавлен regression-тест владения общим `PREFIX` (`make install-scoping-test`) и машинная проверка onboarding record (`make check-onboarding`); оба включены в `check` и `release-check`.
 - README: канонический onboarding record вместо самодельной таблицы; исправлены неверные утверждения о каденции SCA (CI в репозитории нет) и о том, что `install-local*` не выполняет настоящую установку.
+- Добавлен `protocol.ReactionDetail` и поле `ReactionDetails` в `CheckItem`/`SearchItem` — группировка реакций по эмодзи с авторами (кто именно поставил реакцию).
 
 ## [0.1.15]
 
