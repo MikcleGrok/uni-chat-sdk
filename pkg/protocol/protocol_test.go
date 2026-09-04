@@ -1369,3 +1369,63 @@ func TestPostArgsRootPostIDIsOptionalAndRoundTrips(t *testing.T) {
 		t.Fatalf("encoded = %s, want no root_post_id key for a top-level post", b)
 	}
 }
+
+func TestCheckItemCarriesReactionDetails(t *testing.T) {
+	in := CheckItem{
+		ChannelID: "c1",
+		PostID:    "p1",
+		Reactions: []string{"white_check_mark"},
+		ReactionDetails: []ReactionDetail{
+			{Emoji: "white_check_mark", Users: []string{"alice", "bob"}},
+		},
+	}
+	b, err := json.Marshal(in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(b), `"reaction_details":[{"emoji":"white_check_mark","users":["alice","bob"]}]`) {
+		t.Fatalf("encoded = %s, want a reaction_details field", b)
+	}
+	var out CheckItem
+	if err := json.Unmarshal(b, &out); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(out, in) {
+		t.Fatalf("round trip = %+v, want %+v", out, in)
+	}
+}
+
+func TestCheckItemReactionDetailsOmittedWhenEmpty(t *testing.T) {
+	in := CheckItem{ChannelID: "c1", PostID: "p1"}
+	b, err := json.Marshal(in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(b), "reaction_details") {
+		t.Fatalf("encoded = %s, want no reaction_details key when empty", b)
+	}
+}
+
+func TestSearchItemCarriesReactionDetails(t *testing.T) {
+	in := SearchItem{
+		PostID:    "p1",
+		Reactions: []string{"eyes"},
+		ReactionDetails: []ReactionDetail{
+			{Emoji: "eyes", Users: []string{"carol"}},
+		},
+	}
+	b, err := json.Marshal(in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(b), `"reaction_details":[{"emoji":"eyes","users":["carol"]}]`) {
+		t.Fatalf("encoded = %s, want a reaction_details field", b)
+	}
+	var out SearchItem
+	if err := json.Unmarshal(b, &out); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(out, in) {
+		t.Fatalf("round trip = %+v, want %+v", out, in)
+	}
+}

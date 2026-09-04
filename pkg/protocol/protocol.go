@@ -56,6 +56,13 @@ type Response struct {
 	Error string          `json:"error,omitempty"`
 }
 
+// ReactionDetail groups the users who left one specific emoji reaction on a
+// post, pairing the emoji with the reactors' resolved display names.
+type ReactionDetail struct {
+	Emoji string   `json:"emoji"`
+	Users []string `json:"users"`
+}
+
 // CheckItem is one message the client renders: a new post to notify about
 // (check), a post from a loaded scrollback page (history), or the echo of a
 // post we just sent (send).
@@ -80,6 +87,10 @@ type CheckItem struct {
 	WebLink      string   `json:"web_link"`
 	Reactions    []string `json:"reactions,omitempty"`     // deduped emoji names, e.g. ["white_check_mark"]
 	OwnReactions []string `json:"own_reactions,omitempty"` // emoji names put by the current user
+	// ReactionDetails groups Reactions by emoji with the resolved display name
+	// of every user who left it. Additive to Reactions/OwnReactions — an
+	// engine that doesn't (yet) resolve reaction authors leaves it empty.
+	ReactionDetails []ReactionDetail `json:"reaction_details,omitempty"`
 }
 
 // CheckData is the "check" reply: new items plus the per-channel cursors the
@@ -337,16 +348,17 @@ func (a *SearchArgs) UnmarshalJSON(data []byte) error {
 }
 
 type SearchItem struct {
-	PostID       string    `json:"post_id"`
-	ChannelID    string    `json:"channel_id"`
-	ChannelRef   string    `json:"channel_ref,omitempty"`
-	Sender       string    `json:"sender"`
-	SenderUserID string    `json:"sender_user_id,omitempty"`
-	Message      string    `json:"message"`
-	CreatedAt    time.Time `json:"created_at"`
-	ThreadRootID string    `json:"thread_root_id,omitempty"`
-	Link         string    `json:"link,omitempty"`
-	Reactions    []string  `json:"reactions,omitempty"`
+	PostID          string           `json:"post_id"`
+	ChannelID       string           `json:"channel_id"`
+	ChannelRef      string           `json:"channel_ref,omitempty"`
+	Sender          string           `json:"sender"`
+	SenderUserID    string           `json:"sender_user_id,omitempty"`
+	Message         string           `json:"message"`
+	CreatedAt       time.Time        `json:"created_at"`
+	ThreadRootID    string           `json:"thread_root_id,omitempty"`
+	Link            string           `json:"link,omitempty"`
+	Reactions       []string         `json:"reactions,omitempty"`
+	ReactionDetails []ReactionDetail `json:"reaction_details,omitempty"`
 }
 
 type SearchError struct {
