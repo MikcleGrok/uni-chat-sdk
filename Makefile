@@ -12,6 +12,24 @@ GO_VET_WRAPPER := $(CLAUDE_SCRIPTS_DIR)/go-vet.sh
 GOFMT_WRAPPER := $(CLAUDE_SCRIPTS_DIR)/gofmt-check.sh
 GO_TEST_CMD := $(if $(wildcard $(GO_TEST_WRAPPER)),"$(GO_TEST_WRAPPER)",go) $(if $(wildcard $(GO_TEST_WRAPPER)),,test)
 GO_VET_CMD := $(if $(wildcard $(GO_VET_WRAPPER)),"$(GO_VET_WRAPPER)",go) $(if $(wildcard $(GO_VET_WRAPPER)),,vet)
+# Dev/security tooling (staticcheck, govulncheck) is pinned by exact version in
+# tools/go.mod and resolved from that manifest via `go -C tools tool <name>` —
+# never from PATH, and never as a root go.mod tool directive: this repo is a
+# library imported by other repos, and a root tool directive would drag the
+# scanners' own dependency trees into every consumer's module graph and into
+# what `dependency-check` scans as this module's own dependency state. See the
+# header comment in tools/go.mod for the measurement that forced the split.
+#
+# `go -C $(GO_TOOLS_DIR) tool <name>` runs <name> with its process cwd set to
+# $(GO_TOOLS_DIR) (a separate module with no packages of its own), which is
+# fine for a flag-only invocation (`-version`) but wrong for one that takes a
+# package pattern: `./...` would then resolve inside tools/, not against this
+# module's source. govulncheck has its own `-C dir` flag to redirect analysis
+# back to the real module (used in `dependency-check`); staticcheck has no
+# such flag, so `lint` instead builds the tools/go.mod-pinned binary once to a
+# temp path and runs that binary from the repo root.
+GO_TOOLS_DIR := tools
+GO_TOOL := $(GO) -C $(GO_TOOLS_DIR) tool
 DIST ?= dist
 # Acceptance stage: the tests that cross a real process boundary — Listen/Dial
 # over a real unix socket and CallStdio over a real exec.Command child. They
@@ -37,25 +55,27 @@ help: ## Show this help: every target with its purpose
 setup: ## Prepare the local dev environment (module deps and the tools the gates call)
 	@$(GO) mod download
 	@$(GO) mod verify
-	@$(GO) tool staticcheck -version
-	@command -v govulncheck >/dev/null 2>&1 || { printf '%s\n' 'setup: installing govulncheck'; $(GO) install golang.org/x/vuln/cmd/govulncheck@latest; }
+	@$(GO) -C $(GO_TOOLS_DIR) mod download
+	@$(GO) -C $(GO_TOOLS_DIR) mod verify
+	@$(GO_TOOL) staticcheck -version
+	@$(GO_TOOL) govulncheck -version
 	@$(MAKE) --no-print-directory check-env
 
 check-env: ## Verify the Go toolchain and the external tools the targets assume
 	@command -v $(GO) >/dev/null 2>&1 || { printf '%s\n' 'check-env: $(GO) is required' >&2; exit 1; }
 	@have=$$($(GO) env GOVERSION | sed 's/^go//'); printf '%s\n%s\n' '$(GO_MIN)' "$$have" | sort -V -C || { printf 'check-env: go.mod requires Go %s or newer, found %s\n' '$(GO_MIN)' "$$have" >&2; exit 1; }
 	@for tool in git tar shasum awk sed; do command -v "$$tool" >/dev/null 2>&1 || { printf 'check-env: %s is required\n' "$$tool" >&2; exit 1; }; done
-	@command -v govulncheck >/dev/null 2>&1 || { printf '%s\n' 'check-env: dependency-check needs govulncheck; run make setup' >&2; exit 1; }
-	@$(GO) tool staticcheck -version >/dev/null 2>&1 || { printf '%s\n' 'check-env: the go.mod-pinned staticcheck is unavailable; run make setup' >&2; exit 1; }
-	@printf 'check-env OK: Go %s (go.mod requires %s), govulncheck and the pinned staticcheck are available\n' "$$($(GO) env GOVERSION | sed 's/^go//')" '$(GO_MIN)'
+	@$(GO_TOOL) staticcheck -version >/dev/null 2>&1 || { printf '%s\n' 'check-env: the tools/go.mod-pinned staticcheck is unavailable; run make setup' >&2; exit 1; }
+	@$(GO_TOOL) govulncheck -version >/dev/null 2>&1 || { printf '%s\n' 'check-env: the tools/go.mod-pinned govulncheck is unavailable; run make setup' >&2; exit 1; }
+	@printf 'check-env OK: Go %s (go.mod requires %s), tools/go.mod-pinned staticcheck and govulncheck are available\n' "$$($(GO) env GOVERSION | sed 's/^go//')" '$(GO_MIN)'
 
 format: ## Fail when any tracked Go file is not gofmt-clean
 	@tmp=$$(mktemp -d); trap 'rm -rf "$$tmp"' EXIT HUP INT TERM; export HOME="$$tmp/home"; if test -x "$(GOFMT_WRAPPER)"; then "$(GOFMT_WRAPPER)" -C . -novcs; else test -z "$$(gofmt -l $$(go list -f '{{.Dir}}' ./...))"; fi
 
 fmt: format
 
-lint: ## Run the go.mod-pinned staticcheck over every package
-	@go tool staticcheck ./...
+lint: ## Run the tools/go.mod-pinned staticcheck over every package
+	@bindir=$$(mktemp -d); trap 'rm -rf "$$bindir"' EXIT HUP INT TERM; $(GO) -C $(GO_TOOLS_DIR) build -o "$$bindir/staticcheck" honnef.co/go/tools/cmd/staticcheck; "$$bindir/staticcheck" ./...
 
 vet: ## Run go vet over every package
 	@tmp=$$(mktemp -d); trap 'rm -rf "$$tmp"' EXIT HUP INT TERM; mkdir -p "$$tmp/home"; HOME="$$tmp/home" $(GO_VET_CMD) -C . ./...
@@ -82,7 +102,7 @@ coverage: ## Measure coverage as a side metric (no threshold gate)
 	@tmp=$$(mktemp -d); trap 'rm -rf "$$tmp"' EXIT HUP INT TERM; mkdir -p "$$tmp/home"; printf '%s\n' '{}' > "$$tmp/keychain.json"; HOME="$$tmp/home" UNI_CHAT_TEST_KEYCHAIN="$$tmp/keychain.json" $(GO_TEST_CMD) -C . -tags uni_chat_test_keychain -coverprofile="$$tmp/coverage.out" ./...
 
 secrets-check: ## Fail when a private key or token pattern is committed
-	@! git grep -nE '(COSIGN_PRIVATE_KEY[[:space:]]*=|BEGIN (RSA|OPENSSH|EC) PRIVATE KEY|ghp_[A-Za-z0-9]+)' -- . ':!go.sum'
+	@! git grep -nE '(COSIGN_PRIVATE_KEY[[:space:]]*=|BEGIN (RSA|OPENSSH|EC) PRIVATE KEY|ghp_[A-Za-z0-9]+)' -- . ':!go.sum' ':!tools/go.sum'
 
 dependency-check: ## Run the SCA scan (govulncheck) fresh against the current dependency set
 	@if command -v govulncheck >/dev/null; then govulncheck ./...; else echo 'govulncheck unavailable' >&2; exit 1; fi
