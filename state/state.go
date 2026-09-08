@@ -3,8 +3,10 @@
 package state
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
@@ -311,38 +313,134 @@ func validPending(item protocol.CheckItem) bool {
 	return strings.TrimSpace(item.ChannelID) != "" && strings.TrimSpace(item.ChannelRef) != "" && strings.TrimSpace(item.PostID) != ""
 }
 
-// Lock takes the cross-process lock shared by the one-shot engine requests.
-// The returned function releases both the advisory lock and its file handle.
+// defaultLockTimeout bounds Lock's wait for the cross-process advisory lock.
+// It is chosen to be comfortably larger than this lock's normal hold time (a
+// one-shot engine request acquires it, does its work, and releases) and
+// comfortably smaller than the protocol layer's own connection timeouts
+// (pkg/protocol.serveConnectionTimeout = 120s): a caller still waiting past
+// that point has already lost its own client anyway, so failing this lock
+// first — with a diagnosis naming the lock file and the elapsed deadline —
+// is more actionable than an indefinite hang that eventually surfaces as an
+// unrelated timeout further up the stack.
+const defaultLockTimeout = 30 * time.Second
+
+// lockPollInterval is the pause between LOCK_EX|LOCK_NB retries. Short
+// enough that a lock released just after a failed attempt is picked up
+// quickly; long enough not to busy-spin.
+const lockPollInterval = 10 * time.Millisecond
+
+// Lock takes the cross-process lock shared by the one-shot engine requests,
+// bounded by defaultLockTimeout. The returned function releases both the
+// advisory lock and its file handle. Equivalent to
+// LockContext with a context.WithTimeout(context.Background(), defaultLockTimeout).
 func Lock(dir string) (func(), error) {
+	ctx, cancel := context.WithTimeout(context.Background(), defaultLockTimeout)
+	defer cancel()
+	return LockContext(ctx, dir)
+}
+
+// LockContext is Lock's context-aware counterpart. Unlike the previous
+// unconditional syscall.Flock(..., LOCK_EX) — a blocking call with no
+// deadline and no way to observe cancellation, so a wedged or crashed
+// holder's lock file wedged every future caller forever too — this polls
+// with LOCK_EX|LOCK_NB and returns as soon as the lock is acquired, ctx is
+// done, or (for a caller-supplied ctx with no deadline, e.g.
+// context.Background()) never, matching the honest meaning of that ctx. The
+// returned function releases both the advisory lock and its file handle.
+func LockContext(ctx context.Context, dir string) (func(), error) {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return nil, err
 	}
-	file, err := os.OpenFile(filepath.Join(dir, "state.lock"), os.O_CREATE|os.O_RDWR, 0o600) // #nosec G304 -- the lock path is derived from the private application directory.
+	if err := os.Chmod(dir, 0o700); err != nil { // an existing dir's mode is not narrowed by MkdirAll alone.
+		return nil, err
+	}
+	lockPath := filepath.Join(dir, "state.lock")
+	file, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0o600) // #nosec G304 -- the lock path is derived from the private application directory.
 	if err != nil {
 		return nil, err
 	}
-	if err := syscall.Flock(int(file.Fd()), syscall.LOCK_EX); err != nil {
+	if err := file.Chmod(0o600); err != nil { // an existing file's mode is not narrowed by the O_CREATE open mode alone.
 		_ = file.Close()
 		return nil, err
 	}
-	return func() {
-		_ = syscall.Flock(int(file.Fd()), syscall.LOCK_UN)
-		_ = file.Close()
-	}, nil
+	for {
+		flockErr := syscall.Flock(int(file.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
+		if flockErr == nil {
+			return func() {
+				_ = syscall.Flock(int(file.Fd()), syscall.LOCK_UN)
+				_ = file.Close()
+			}, nil
+		}
+		if !errors.Is(flockErr, syscall.EWOULDBLOCK) {
+			_ = file.Close()
+			return nil, flockErr
+		}
+		select {
+		case <-ctx.Done():
+			_ = file.Close()
+			if deadline, ok := ctx.Deadline(); ok {
+				return nil, fmt.Errorf("state: lock %s not acquired before deadline %s (%w)", lockPath, deadline.Format(time.RFC3339), ctx.Err())
+			}
+			return nil, fmt.Errorf("state: lock %s not acquired: %w", lockPath, ctx.Err())
+		case <-time.After(lockPollInterval):
+		}
+	}
 }
 
 // writeJSON writes v atomically (temp file + rename) with 0600 perms.
+// writeJSON writes v atomically (temp file + rename) with 0600 perms on the
+// final file. It defends against the same threat docs/security.md names —
+// "права 0700/0600 по ошибке оказались шире (баг, неверный umask,
+// восстановление из бэкапа)" — for every path it touches:
+//   - the target directory's mode is explicitly narrowed even if it already
+//     existed (os.MkdirAll alone does not change an existing directory's
+//     mode);
+//   - the temp file is created via os.CreateTemp (a fresh, non-predictable
+//     name in the same directory, retried internally on any collision)
+//     rather than a fixed path+".tmp": a predictable path can already exist
+//     with wider permissions from exactly that threat model, and
+//     os.WriteFile's mode argument is silently ignored by O_TRUNC against
+//     such a pre-existing file, so the wide mode would have survived
+//     straight through the rename. A fresh file cannot inherit anyone
+//     else's stale permissions, and two concurrent writers can no longer
+//     collide on the same fixed tmp path either.
 func writeJSON(path string, v any) error {
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return err
+	}
+	if err := os.Chmod(dir, 0o700); err != nil { // narrow an already-existing dir's mode too.
 		return err
 	}
 	b, err := json.MarshalIndent(v, "", "  ")
 	if err != nil {
 		return err
 	}
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, b, 0o600); err != nil {
+	tmp, err := os.CreateTemp(dir, filepath.Base(path)+".*.tmp")
+	if err != nil {
 		return err
 	}
-	return os.Rename(tmp, path)
+	tmpPath := tmp.Name()
+	removeTmp := true
+	defer func() {
+		if removeTmp {
+			_ = os.Remove(tmpPath)
+		}
+	}()
+	if err := tmp.Chmod(0o600); err != nil { // explicit, not relied upon as merely CreateTemp's current default.
+		_ = tmp.Close()
+		return err
+	}
+	if _, err := tmp.Write(b); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	if err := os.Rename(tmpPath, path); err != nil {
+		return err
+	}
+	removeTmp = false
+	return nil
 }
