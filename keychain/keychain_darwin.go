@@ -28,6 +28,19 @@ static int keychain_get(const char *service, const char *account, void **value, 
 	return 0;
 }
 
+static int keychain_delete(const char *service, const char *account) {
+	CFStringRef service_ref = CFStringCreateWithCString(NULL, service, kCFStringEncodingUTF8);
+	CFStringRef account_ref = CFStringCreateWithCString(NULL, account, kCFStringEncodingUTF8);
+	const void *keys[] = { kSecClass, kSecAttrService, kSecAttrAccount };
+	const void *values[] = { kSecClassGenericPassword, service_ref, account_ref };
+	CFDictionaryRef query = CFDictionaryCreate(NULL, keys, values, 3, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
+	OSStatus status = SecItemDelete(query);
+	CFRelease(query);
+	CFRelease(account_ref);
+	CFRelease(service_ref);
+	return (int)status;
+}
+
 static int keychain_set(const char *service, const char *account, const void *value, size_t value_len) {
 	CFStringRef service_ref = CFStringCreateWithCString(NULL, service, kCFStringEncodingUTF8);
 	CFStringRef account_ref = CFStringCreateWithCString(NULL, account, kCFStringEncodingUTF8);
@@ -85,6 +98,23 @@ func platformSetTokenImpl(service, account, token string) error {
 	defer C.free(value)
 	status := C.keychain_set(cService, cAccount, value, C.size_t(len(token)))
 	if status != 0 {
+		return fmt.Errorf("security.framework status %d", int(status))
+	}
+	return nil
+}
+
+// platformDeleteTokenImpl removes the stored item for (service, account) via
+// SecItemDelete. It is idempotent: an item that is already absent
+// (errSecItemNotFound) is not an error, so callers — in particular a test's
+// t.Cleanup, which must run even when an earlier step in the same test never
+// got far enough to create the item — can call it unconditionally.
+func platformDeleteTokenImpl(service, account string) error {
+	cService := C.CString(service)
+	defer C.free(unsafe.Pointer(cService))
+	cAccount := C.CString(account)
+	defer C.free(unsafe.Pointer(cAccount))
+	status := C.keychain_delete(cService, cAccount)
+	if status != 0 && status != C.errSecItemNotFound {
 		return fmt.Errorf("security.framework status %d", int(status))
 	}
 	return nil

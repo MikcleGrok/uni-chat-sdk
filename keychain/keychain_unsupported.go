@@ -11,3 +11,7 @@ func platformGetTokenImpl(string, string) (string, error) {
 func platformSetTokenImpl(string, string, string) error {
 	return errors.New("macOS Security.framework is required")
 }
+
+func platformDeleteTokenImpl(string, string) error {
+	return errors.New("macOS Security.framework is required")
+}
