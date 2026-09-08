@@ -779,6 +779,24 @@ func Listen(socket string) (net.Listener, error) {
 // Handler turns one request into one response.
 type Handler func(Request) Response
 
+// HandlerContext is Handler's context-aware counterpart. ServeContext derives
+// a per-connection context from its own ctx and passes it to the handler on
+// every call: a handler that observes ctx.Done() (e.g. by selecting on it
+// around long-running persistence) can return promptly when the connection
+// closes or the server begins shutting down, instead of finishing in the
+// background after ServeContext has already returned to its caller — the gap
+// a plain Handler could never close, because its signature carries no
+// context at all. See TestServeContextHandlerObservesConnectionContextCancellation.
+type HandlerContext func(context.Context, Request) Response
+
+// WithContext adapts h into a HandlerContext that ignores the context —
+// the compatibility path old callers of Serve/ServeStdio need zero changes
+// for: those two keep accepting a plain Handler and wrap it with this
+// adapter internally before handing it to ServeContext/ServeStdioContext.
+func (h Handler) WithContext() HandlerContext {
+	return func(_ context.Context, req Request) Response { return h(req) }
+}
+
 // Serve accepts connections until the listener is closed, one goroutine each.
 // A transient Accept error (e.g. a client aborting mid-handshake, or the
 // process briefly running out of file descriptors) does not stop the loop —
@@ -786,17 +804,20 @@ type Handler func(Request) Response
 // path for a truly dead listener, instead of a stray error silently ending
 // the accept loop while the process stays alive and serves nothing.
 func Serve(ln net.Listener, h Handler) {
-	ServeContext(context.Background(), ln, h)
+	ServeContext(context.Background(), ln, h.WithContext())
 }
 
 // ServeContext accepts connections until the listener closes or ctx is
-// cancelled. Cancellation closes active sockets and gives handlers a bounded
-// opportunity to finish persistence before Serve returns.
-func ServeContext(ctx context.Context, ln net.Listener, h Handler) {
+// cancelled. Cancellation closes active sockets, cancels each active
+// connection's own derived context (so a HandlerContext blocked on
+// ctx.Done() returns immediately), and gives handlers that do not observe
+// cancellation a bounded opportunity to finish persistence before
+// ServeContext returns.
+func ServeContext(ctx context.Context, ln net.Listener, h HandlerContext) {
 	sem := make(chan struct{}, serveMaxConcurrentConnections)
 	var wg sync.WaitGroup
 	var activeMu sync.Mutex
-	active := map[net.Conn]struct{}{}
+	active := map[net.Conn]context.CancelFunc{}
 	shutdown := make(chan struct{})
 	go func() {
 		select {
@@ -808,7 +829,8 @@ func ServeContext(ctx context.Context, ln net.Listener, h Handler) {
 	defer func() {
 		close(shutdown)
 		activeMu.Lock()
-		for conn := range active {
+		for conn, cancel := range active {
+			cancel()
 			_ = conn.Close()
 		}
 		activeMu.Unlock()
@@ -830,19 +852,21 @@ func ServeContext(ctx context.Context, ln net.Listener, h Handler) {
 		}
 		select {
 		case sem <- struct{}{}:
+			connCtx, cancel := context.WithCancel(ctx)
 			activeMu.Lock()
-			active[conn] = struct{}{}
+			active[conn] = cancel
 			activeMu.Unlock()
 			wg.Add(1)
 			go func() {
 				defer wg.Done()
+				defer cancel()
 				defer func() { <-sem }()
 				defer func() {
 					activeMu.Lock()
 					delete(active, conn)
 					activeMu.Unlock()
 				}()
-				serveConn(conn, h)
+				serveConn(connCtx, conn, h)
 			}()
 		default:
 			go writeBusyResponse(conn)
@@ -860,7 +884,85 @@ const (
 	deleteRangeSummaryServeTimeout = 11 * time.Minute
 	DeleteJobStartTimeout          = 12 * time.Minute
 	deleteJobStartServeTimeout     = DeleteJobStartTimeout
+	// maxEngineStdoutBytes/maxEngineStderrBytes bound how much of a spawned
+	// engine binary's output CallStdio will buffer in memory — symmetric to
+	// maxRequestJSONBytes on the incoming side (decodeBoundedRequest), which
+	// existed long before this pair did. Without a limit here, a hung or
+	// malicious engine binary (docs/security.md's own named threat actor)
+	// writing an unbounded stream could exhaust the router's memory well
+	// before runBoundedCommand's timeout/SIGTERM/SIGKILL escalation ever
+	// fires — the timeout bounds wall-clock time, not bytes written in the
+	// meantime. stdout carries the actual response, so it gets the same
+	// budget as a request; stderr is diagnostic-only, so a much smaller
+	// budget is enough to preserve useful context in an error message.
+	maxEngineStdoutBytes = 1 << 20
+	maxEngineStderrBytes = 8 << 10
 )
+
+// boundedBuffer caps how many bytes it will retain, discarding (not
+// blocking, not erroring) anything past that limit and recording that a
+// truncation happened. It is not safe for concurrent use — matching
+// bytes.Buffer as used here, always accessed from exactly one goroutine
+// (the exec.Cmd that owns it).
+type boundedBuffer struct {
+	buf       bytes.Buffer
+	limit     int
+	truncated bool
+}
+
+func newBoundedBuffer(limit int) *boundedBuffer { return &boundedBuffer{limit: limit} }
+
+// Write implements io.Writer. It always reports the full length of p as
+// written (never a short-write error) so it drops in as cmd.Stdout/Stderr
+// without exec.Cmd treating a capped write as a copy failure; bytes beyond
+// the limit are simply not retained.
+func (b *boundedBuffer) Write(p []byte) (int, error) {
+	if b.truncated {
+		return len(p), nil
+	}
+	room := b.limit - b.buf.Len()
+	if room <= 0 {
+		b.truncated = true
+		return len(p), nil
+	}
+	if len(p) > room {
+		b.buf.Write(p[:room])
+		b.truncated = true
+		return len(p), nil
+	}
+	b.buf.Write(p)
+	return len(p), nil
+}
+
+func (b *boundedBuffer) Bytes() []byte { return b.buf.Bytes() }
+
+// sanitizeStderrTail renders stderr's captured content for inclusion in an
+// error message: trimmed, every ASCII control byte (0x00-0x1F, 0x7F —
+// including newlines) replaced with a space, and suffixed with an explicit
+// truncation marker when the bounded buffer capped it. The untrusted engine
+// process's stderr is not otherwise validated in any way, so without this a
+// malicious or buggy engine could forge what looks like an additional log
+// line, or embed terminal escape sequences, in whatever log line this error
+// eventually becomes part of.
+func sanitizeStderrTail(stderr *boundedBuffer) string {
+	sanitized := sanitizeControlBytes(bytes.TrimSpace(stderr.Bytes()))
+	if stderr.truncated {
+		return fmt.Sprintf("%s ... [stderr truncated at %d bytes]", sanitized, maxEngineStderrBytes)
+	}
+	return sanitized
+}
+
+func sanitizeControlBytes(b []byte) string {
+	out := make([]byte, len(b))
+	for i, c := range b {
+		if c < 0x20 || c == 0x7f {
+			out[i] = ' '
+		} else {
+			out[i] = c
+		}
+	}
+	return string(out)
+}
 
 func serveConnectionTimeoutFor(cmd string) time.Duration {
 	if cmd == "delete_job_start" {
@@ -881,7 +983,7 @@ func writeBusyResponse(conn net.Conn) {
 	_ = json.NewEncoder(conn).Encode(Fail(ErrServerBusy))
 }
 
-func serveConn(conn net.Conn, h Handler) {
+func serveConn(ctx context.Context, conn net.Conn, h HandlerContext) {
 	defer func() { _ = conn.Close() }()
 	_ = conn.SetDeadline(time.Now().Add(serveConnectionTimeout))
 	var req Request
@@ -890,7 +992,7 @@ func serveConn(conn net.Conn, h Handler) {
 		return
 	}
 	_ = conn.SetDeadline(time.Now().Add(serveConnectionTimeoutFor(req.Cmd)))
-	_ = json.NewEncoder(conn).Encode(callHandler(h, req))
+	_ = json.NewEncoder(conn).Encode(callHandlerContext(ctx, h, req))
 }
 
 func decodeBoundedRequest(in io.Reader, req *Request) error {
@@ -944,17 +1046,17 @@ func rejectSocketTrailingData(conn net.Conn) error {
 	}
 }
 
-// callHandler runs h(req), converting a panic into a Fail response instead of
-// letting it unwind out of the per-connection goroutine and crash the
-// process. A single misbehaving handler (nil map, failed type assertion, …)
-// then costs one connection, not every in-flight one.
-func callHandler(h Handler, req Request) (resp Response) {
+// callHandlerContext runs h(ctx, req), converting a panic into a Fail
+// response instead of letting it unwind out of the per-connection goroutine
+// and crash the process. A single misbehaving handler (nil map, failed type
+// assertion, …) then costs one connection, not every in-flight one.
+func callHandlerContext(ctx context.Context, h HandlerContext, req Request) (resp Response) {
 	defer func() {
 		if r := recover(); r != nil {
 			resp = Fail(fmt.Errorf("internal error: %v", r))
 		}
 	}()
-	return h(req)
+	return h(ctx, req)
 }
 
 // EnginesPath is ~/.uni-chat/engines.json — the engine registry the router
@@ -1001,16 +1103,25 @@ type CapabilitiesData struct {
 }
 
 // ServeStdio is the adapter side of the machine-call transport: it reads
-// exactly one Request from in, runs h (panic-guarded via callHandler), and
-// writes exactly one Response to out — one request, one response, then the
-// process exits (spawn-per-request). A malformed request still yields an
+// exactly one Request from in, runs h (panic-guarded via callHandlerContext),
+// and writes exactly one Response to out — one request, one response, then
+// the process exits (spawn-per-request). A malformed request still yields an
 // {ok:false} Response rather than a silent failure.
 func ServeStdio(in io.Reader, out io.Writer, h Handler) error {
+	return ServeStdioContext(context.Background(), in, out, h.WithContext())
+}
+
+// ServeStdioContext is ServeStdio's context-aware counterpart, symmetric with
+// ServeContext: h receives ctx and can observe cancellation while decoding
+// input is already bounded, so this mainly matters for a handler whose own
+// body does long-running work and wants to return promptly if the adapter
+// process is asked to shut down mid-request.
+func ServeStdioContext(ctx context.Context, in io.Reader, out io.Writer, h HandlerContext) error {
 	var req Request
 	if err := decodeBoundedRequest(in, &req); err != nil {
 		return json.NewEncoder(out).Encode(Fail(fmt.Errorf("bad request: %w", err)))
 	}
-	return json.NewEncoder(out).Encode(callHandler(h, req))
+	return json.NewEncoder(out).Encode(callHandlerContext(ctx, h, req))
 }
 
 // CallStdio is the router side of the machine-call transport: it spawns bin
@@ -1028,12 +1139,16 @@ func CallStdio(bin string, args []string, req Request, timeout time.Duration) (R
 	}
 	cmd := exec.Command(bin, args...) // #nosec G204 -- the engine binary is selected from the private registry.
 	cmd.Stdin = bytes.NewReader(reqBytes)
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
+	stdout := newBoundedBuffer(maxEngineStdoutBytes)
+	stderr := newBoundedBuffer(maxEngineStderrBytes)
+	cmd.Stdout = stdout
+	cmd.Stderr = stderr
 	configureProcessGroup(cmd)
 	if err := runBoundedCommand(ctx, cmd, timeout); err != nil {
-		return Response{}, fmt.Errorf("engine %s: %w: %s", bin, err, strings.TrimSpace(stderr.String()))
+		return Response{}, fmt.Errorf("engine %s: %w: %s", bin, err, sanitizeStderrTail(stderr))
+	}
+	if stdout.truncated {
+		return Response{}, fmt.Errorf("engine %s: response exceeds %d bytes", bin, maxEngineStdoutBytes)
 	}
 	var resp Response
 	if err := json.Unmarshal(bytes.TrimSpace(stdout.Bytes()), &resp); err != nil {
