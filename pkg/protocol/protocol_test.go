@@ -403,6 +403,72 @@ func TestServeReturnsBusyWhenConnectionLimitIsReached(t *testing.T) {
 	wg.Wait()
 }
 
+// TestServeBusyManySimultaneousCallersAllGetGracefulResponse stresses the
+// same race TestServeReturnsBusyWhenConnectionLimitIsReached exercises with a
+// single extra caller, but with many simultaneous ones, to make a rare
+// ordering bug reproduce reliably instead of only occasionally under full
+// suite load. writeBusyResponse used to write its response and Close() the
+// connection without ever reading anything the caller sent — if the caller's
+// own Call() hadn't finished writing its request by the time that Close()
+// landed, the write failed with a raw broken-pipe/connection-reset error
+// instead of the caller ever seeing the graceful {ok:false} busy response.
+func TestServeBusyManySimultaneousCallersAllGetGracefulResponse(t *testing.T) {
+	t.Parallel()
+	sock := filepath.Join(shortSocketDir(t), "d.sock")
+	ln, err := Listen(sock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = ln.Close() }()
+	entered := make(chan struct{}, serveMaxConcurrentConnections)
+	release := make(chan struct{})
+	go Serve(ln, func(Request) Response { entered <- struct{}{}; <-release; return OK(nil) })
+	var holders sync.WaitGroup
+	for i := 0; i < serveMaxConcurrentConnections; i++ {
+		holders.Add(1)
+		go func() {
+			defer holders.Done()
+			_, _ = Call(sock, Request{Cmd: "hold"}, 5*time.Second)
+		}()
+	}
+	for i := 0; i < serveMaxConcurrentConnections; i++ {
+		select {
+		case <-entered:
+		case <-time.After(5 * time.Second):
+			t.Fatal("connection slot was not occupied")
+		}
+	}
+
+	const extraCallers = 20
+	type outcome struct {
+		resp Response
+		err  error
+	}
+	results := make(chan outcome, extraCallers)
+	var extras sync.WaitGroup
+	for i := 0; i < extraCallers; i++ {
+		extras.Add(1)
+		go func() {
+			defer extras.Done()
+			resp, err := Call(sock, Request{Cmd: "busy"}, 5*time.Second)
+			results <- outcome{resp, err}
+		}()
+	}
+	extras.Wait()
+	close(results)
+	for r := range results {
+		if r.err != nil {
+			t.Fatalf("busy caller got a raw I/O error instead of a graceful response: %v", r.err)
+		}
+		if r.resp.OK || r.resp.Error != ErrServerBusy.Error() {
+			t.Fatalf("busy response = %+v, want failed server busy response", r.resp)
+		}
+	}
+
+	close(release)
+	holders.Wait()
+}
+
 func TestServeBusyUnreadClientDoesNotBlockAcceptLoop(t *testing.T) {
 	t.Parallel()
 	sock := filepath.Join(shortSocketDir(t), "d.sock")

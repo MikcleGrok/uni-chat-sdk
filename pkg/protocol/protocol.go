@@ -977,8 +977,20 @@ func serveConnectionTimeoutFor(cmd string) time.Duration {
 	return serveConnectionTimeout
 }
 
+// writeBusyResponse replies to a connection accepted while every serve slot
+// is occupied. It reads (and discards) whatever the caller sends before
+// writing the response and closing: closing immediately, with no read at
+// all, races the caller's own request write — if Call's Encode hadn't yet
+// reached the kernel when this goroutine's Close() landed, the caller's
+// write failed outright with a raw broken-pipe/connection-reset error
+// instead of ever seeing this graceful {ok:false} response. Reading first
+// guarantees the caller's write can always complete. See
+// TestServeBusyManySimultaneousCallersAllGetGracefulResponse.
 func writeBusyResponse(conn net.Conn) {
 	defer func() { _ = conn.Close() }()
+	_ = conn.SetReadDeadline(time.Now().Add(serveBusyWriteTimeout))
+	var discard Request
+	_ = decodeBoundedRequest(conn, &discard)
 	_ = conn.SetWriteDeadline(time.Now().Add(serveBusyWriteTimeout))
 	_ = json.NewEncoder(conn).Encode(Fail(ErrServerBusy))
 }
