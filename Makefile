@@ -30,6 +30,15 @@ GO_VET_CMD := $(if $(wildcard $(GO_VET_WRAPPER)),"$(GO_VET_WRAPPER)",go) $(if $(
 # temp path and runs that binary from the repo root.
 GO_TOOLS_DIR := tools
 GO_TOOL := $(GO) -C $(GO_TOOLS_DIR) tool
+EVIDENCE_DIR ?= .task/release-evidence
+DEPENDENCY_EVIDENCE := $(EVIDENCE_DIR)/dependency.properties
+# Plain-CLI SCA cadence: at least once every 30 days (08-security-and-reliability.md).
+# Enforced by the dependency-freshness staleness gate inside `check`/`release-check`.
+SCA_WINDOW_DAYS ?= 30
+# OSV-Scanner is version-pinned: its mandatory full-native flag set
+# (--data-source native --all-vulns) was verified against `osv-scanner scan
+# source --help` of exactly this version.
+OSV_SCANNER_VERSION ?= 2.5.1
 DIST ?= dist
 # Acceptance stage: the tests that cross a real process boundary — Listen/Dial
 # over a real unix socket and CallStdio over a real exec.Command child. They
@@ -43,7 +52,7 @@ ARCHIVE := $(DIST)/uni-chat-sdk-$(VERSION).tar.gz
 LOCAL_RELEASE_DIR := $(DIST)/local-release/$(VERSION)
 LOCAL_RELEASE_ARCHIVE := $(LOCAL_RELEASE_DIR)/uni-chat-sdk-$(VERSION).tar.gz
 
-.PHONY: help setup check-env format fmt lint vet build test test-unit test-acceptance race coverage secrets-check dependency-check security version check-version check-onboarding whats-new release-check check check-local-tag package-local install-local verify-local-install install-scoping-test install-local-smoke release-local local-release
+.PHONY: help setup check-env format fmt lint vet build test test-unit test-acceptance race coverage secrets-check dependency-check dependency-freshness security version check-version check-onboarding whats-new release-check check check-local-tag package-local install-local verify-local-install install-scoping-test install-local-smoke release-local local-release
 
 help: ## Show this help: every target with its purpose
 	@printf 'uni-chat-sdk — make targets\n\n'
@@ -51,6 +60,7 @@ help: ## Show this help: every target with its purpose
 	@printf '\nVariables: GO=%s PREFIX=%s DIST=%s VERSION=%s TAG=%s\n' '$(GO)' '$(PREFIX)' '$(DIST)' '$(VERSION)' '$(TAG)'
 	@printf '\nHOST-ONLY: the keychain package compiles and tests only on macOS (cgo + Security.framework);\n'
 	@printf 'every other package and target is platform-independent. Owner: maintainer.\n'
+	@printf '\nSCA: dependency-check scans fresh (govulncheck + osv-scanner); dependency-freshness enforces the %s-day cadence gate without re-scanning.\n' '$(SCA_WINDOW_DAYS)'
 
 setup: ## Prepare the local dev environment (module deps and the tools the gates call)
 	@$(GO) mod download
@@ -67,7 +77,9 @@ check-env: ## Verify the Go toolchain and the external tools the targets assume
 	@for tool in git tar shasum awk sed; do command -v "$$tool" >/dev/null 2>&1 || { printf 'check-env: %s is required\n' "$$tool" >&2; exit 1; }; done
 	@$(GO_TOOL) staticcheck -version >/dev/null 2>&1 || { printf '%s\n' 'check-env: the tools/go.mod-pinned staticcheck is unavailable; run make setup' >&2; exit 1; }
 	@$(GO_TOOL) govulncheck -version >/dev/null 2>&1 || { printf '%s\n' 'check-env: the tools/go.mod-pinned govulncheck is unavailable; run make setup' >&2; exit 1; }
-	@printf 'check-env OK: Go %s (go.mod requires %s), tools/go.mod-pinned staticcheck and govulncheck are available\n' "$$($(GO) env GOVERSION | sed 's/^go//')" '$(GO_MIN)'
+	@command -v osv-scanner >/dev/null 2>&1 || { printf '%s\n' 'check-env: dependency-check needs osv-scanner (pinned $(OSV_SCANNER_VERSION)); install: go install github.com/google/osv-scanner/v2/cmd/osv-scanner@v$(OSV_SCANNER_VERSION)' >&2; exit 1; }
+	@osv-scanner --version 2>&1 | grep -Fq 'osv-scanner version: $(OSV_SCANNER_VERSION)' || { printf '%s\n' 'check-env: osv-scanner MUST be the pinned version $(OSV_SCANNER_VERSION); the mandatory flag set was verified against that version only' >&2; exit 1; }
+	@printf 'check-env OK: Go %s (go.mod requires %s), tools/go.mod-pinned staticcheck+govulncheck and osv-scanner $(OSV_SCANNER_VERSION) are available\n' "$$($(GO) env GOVERSION | sed 's/^go//')" '$(GO_MIN)'
 
 format: ## Fail when any tracked Go file is not gofmt-clean
 	@tmp=$$(mktemp -d); trap 'rm -rf "$$tmp"' EXIT HUP INT TERM; export HOME="$$tmp/home"; if test -x "$(GOFMT_WRAPPER)"; then "$(GOFMT_WRAPPER)" -C . -novcs; else test -z "$$(gofmt -l $$(go list -f '{{.Dir}}' ./...))"; fi
@@ -104,10 +116,40 @@ coverage: ## Measure coverage as a side metric (no threshold gate)
 secrets-check: ## Fail when a private key or token pattern is committed
 	@! git grep -nE '(COSIGN_PRIVATE_KEY[[:space:]]*=|BEGIN (RSA|OPENSSH|EC) PRIVATE KEY|ghp_[A-Za-z0-9]+)' -- . ':!go.sum' ':!tools/go.sum'
 
-dependency-check: ## Run the SCA scan (govulncheck) fresh against the current dependency set
-	@if command -v govulncheck >/dev/null; then govulncheck ./...; else echo 'govulncheck unavailable' >&2; exit 1; fi
+# osv-scanner defaults --data-source to deps.dev, which is not the native OSV
+# data 08-security-and-reliability.md requires; both flags below were confirmed
+# against `osv-scanner scan source --help` of the pinned $(OSV_SCANNER_VERSION).
+# `rm -f` first: without it, a stale-but-still-matching-digest evidence file
+# from BEFORE a new vulnerability was published would let dependency-freshness
+# stay green after a subsequent red scan — this scan must actually re-earn
+# scan_status=clean every time it runs, not merely leave old evidence in place.
+dependency-check: ## Run the SCA scan (govulncheck + osv-scanner) fresh and write evidence
+	@mkdir -p "$(EVIDENCE_DIR)"
+	@rm -f "$(DEPENDENCY_EVIDENCE)"
+	@$(GO) mod verify
+	@command -v osv-scanner >/dev/null || { printf '%s\n' 'BLOCKED: osv-scanner is required; refusing an unscanned dependency state (install: go install github.com/google/osv-scanner/v2/cmd/osv-scanner@v$(OSV_SCANNER_VERSION))' >&2; exit 1; }
+	@osv-scanner --version 2>&1 | grep -Fq 'osv-scanner version: $(OSV_SCANNER_VERSION)' || { printf '%s\n' 'BLOCKED: osv-scanner MUST be the pinned version $(OSV_SCANNER_VERSION); the mandatory flag set was verified against that version only' >&2; exit 1; }
+	@$(GO_TOOL) govulncheck -C "$(CURDIR)" ./... > "$(EVIDENCE_DIR)/govulncheck.txt"
+	@osv-scanner scan source --lockfile go.mod --data-source native --all-vulns --format json > "$(EVIDENCE_DIR)/osv-scanner.json"
+	@test -s "$(EVIDENCE_DIR)/govulncheck.txt" -a -s "$(EVIDENCE_DIR)/osv-scanner.json"
+	@printf 'schema=release-evidence-v1\ntools=govulncheck,osv-scanner\ntool_versions=%s | %s\nformat=text/plain,application/json\ndatabase=Go vulnerability database | OSV.dev (native)\npolicy=docs/security.md\nscan_status=clean\ninput_digest=%s\nscanned_at=%s\nscanned_at_epoch=%s\ncadence_window_days=$(SCA_WINDOW_DAYS)\nevidence=$(EVIDENCE_DIR)/govulncheck.txt,$(EVIDENCE_DIR)/osv-scanner.json\nevidence_sha256=%s,%s\n' \
+	  "$$($(GO_TOOL) govulncheck -version 2>&1 | tr '\n' ' ')" "$$(osv-scanner --version 2>&1 | tr '\n' ' ')" \
+	  "$$(cat go.mod go.sum | shasum -a 256 | cut -d ' ' -f 1)" \
+	  "$$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$$(date +%s)" \
+	  "$$(shasum -a 256 "$(EVIDENCE_DIR)/govulncheck.txt" | cut -d ' ' -f 1)" \
+	  "$$(shasum -a 256 "$(EVIDENCE_DIR)/osv-scanner.json" | cut -d ' ' -f 1)" \
+	  > "$(DEPENDENCY_EVIDENCE)"
 
-security: secrets-check dependency-check ## Run every security gate (secrets and SCA)
+# Cadence staleness gate: cheap, runs inside `check` and `release-check`. It
+# never re-scans — it refuses to go green on evidence that is missing, stale,
+# or describes a different dependency state than the committed one.
+dependency-freshness: ## Fail fast when SCA evidence is missing, stale, red, or out of date with go.mod/go.sum
+	@test -s "$(DEPENDENCY_EVIDENCE)" || { printf '%s\n' 'BLOCKED: no SCA evidence at $(DEPENDENCY_EVIDENCE); missing evidence is a blocker, not a first run — run: make dependency-check' >&2; exit 1; }
+	@grep -Fxq 'scan_status=clean' "$(DEPENDENCY_EVIDENCE)" || { printf '%s\n' 'BLOCKED: last SCA run did not end clean; re-run make dependency-check' >&2; exit 1; }
+	@grep -Fxq "input_digest=$$(cat go.mod go.sum | shasum -a 256 | cut -d ' ' -f 1)" "$(DEPENDENCY_EVIDENCE)" || { printf '%s\n' 'BLOCKED: SCA evidence describes a different dependency state than the committed go.mod/go.sum; run: make dependency-check' >&2; exit 1; }
+	@scanned=$$(sed -n 's/^scanned_at_epoch=//p' "$(DEPENDENCY_EVIDENCE)"); test -n "$$scanned" || { printf '%s\n' 'BLOCKED: SCA evidence has no scanned_at_epoch; run: make dependency-check' >&2; exit 1; }; age=$$(( $$(date +%s) - scanned )); window=$$(( $(SCA_WINDOW_DAYS) * 86400 )); test "$$age" -le "$$window" || { printf 'BLOCKED: SCA evidence is %s days old, cadence window is $(SCA_WINDOW_DAYS) days; run: make dependency-check\n' "$$(( age / 86400 ))" >&2; exit 1; }; printf 'dependency-freshness: age %s days, window $(SCA_WINDOW_DAYS) days, evidence $(DEPENDENCY_EVIDENCE), scan_status=clean\n' "$$(( age / 86400 ))"
+
+security: secrets-check dependency-check ## Run every security gate (secrets and a fresh SCA scan)
 
 version: ## Print the normalized module version resolved from the exact tag on HEAD
 	@printf '%s\n' '$(VERSION)'
@@ -137,7 +179,7 @@ release-check: ## Pre-tag release completeness gate on the candidate commit (mak
 	@$(MAKE) --no-print-directory check-version
 	@if git rev-parse --verify --quiet 'refs/tags/$(TAG)' >/dev/null; then test "$$(git rev-parse '$(TAG)^{commit}')" = "$$(git rev-parse HEAD)" || { printf '%s\n' 'release-check: planned tag $(TAG) already exists on a different commit' >&2; exit 1; }; fi
 	@$(MAKE) --no-print-directory whats-new >/dev/null || { printf '%s\n' 'release-check: CHANGELOG.md carries no release notes for $(VERSION)' >&2; exit 1; }
-	@$(MAKE) --no-print-directory check-env check-onboarding format lint vet build test test-acceptance race secrets-check dependency-check install-scoping-test
+	@$(MAKE) --no-print-directory check-env check-onboarding format lint vet build test test-acceptance race secrets-check dependency-check dependency-freshness install-scoping-test
 	@printf 'release-check OK: candidate %s, planned tag %s, normalized version %s\n' "$$(git rev-parse HEAD)" '$(TAG)' '$(VERSION)'
 
 check-local-tag: ## Assert HEAD is the exact canonical local tag on a clean tree
@@ -174,4 +216,4 @@ release-local: check-local-tag ## Write the offline release bundle for the exact
 
 local-release: release-local ## Alias for release-local
 
-check: check-env check-version check-onboarding format lint vet build test test-acceptance race coverage secrets-check dependency-check install-scoping-test ## Run every local gate
+check: check-env check-version check-onboarding format lint vet build test test-acceptance race coverage secrets-check dependency-freshness install-scoping-test ## Run every local gate
