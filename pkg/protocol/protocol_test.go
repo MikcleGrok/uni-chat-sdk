@@ -1180,7 +1180,7 @@ func TestDeleteBatchJSONRoundTrip(t *testing.T) {
 }
 
 func TestDeletePreviewJSONRoundTripKeepsChannelRefSeparateFromChannelID(t *testing.T) {
-	in := DeletePreviewArgs{Engine: "mattermost", Channel: "unisender/releases", From: time.UnixMilli(1000).UTC(), To: time.UnixMilli(2000).UTC(), IncludeThreadRoots: true}
+	in := DeletePreviewArgs{Engine: "mattermost", Channel: "unisender/releases", From: time.UnixMilli(1000).UTC(), To: time.UnixMilli(2000).UTC(), IncludeThreadRoots: true, WantChannelKey: true}
 	b, err := json.Marshal(in)
 	if err != nil {
 		t.Fatal(err)
@@ -1192,10 +1192,13 @@ func TestDeletePreviewJSONRoundTripKeepsChannelRefSeparateFromChannelID(t *testi
 	if !reflect.DeepEqual(out, in) || out.ChannelID != "" {
 		t.Fatalf("round trip = %+v, want channel ref without opaque channel id", out)
 	}
+	if !strings.Contains(string(b), `"want_channel_key":true`) {
+		t.Fatalf("encoded = %s, want want_channel_key=true", b)
+	}
 }
 
 func TestDeletePreviewDataJSONRoundTripKeepsRangeSafetyMetadata(t *testing.T) {
-	in := DeletePreviewData{ChannelID: "c1", Requested: 4, Targets: []DeleteTarget{{PostID: "reply"}}, SkippedRootIDs: []string{"root"}, Snapshot: "stable"}
+	in := DeletePreviewData{ChannelID: "c1", ChannelKey: "mattermost/team/channel", Requested: 4, Targets: []DeleteTarget{{PostID: "reply"}}, SkippedRootIDs: []string{"root"}, Snapshot: "stable"}
 	b, err := json.Marshal(in)
 	if err != nil {
 		t.Fatal(err)
@@ -1206,6 +1209,66 @@ func TestDeletePreviewDataJSONRoundTripKeepsRangeSafetyMetadata(t *testing.T) {
 	}
 	if !reflect.DeepEqual(out, in) {
 		t.Fatalf("round trip = %+v, want %+v", out, in)
+	}
+}
+
+func TestDeleteChannelKeyWireCompatibility(t *testing.T) {
+	rangeArgs := DeleteRangeSummaryArgs{Channel: "mattermost/team/channel", From: time.UnixMilli(1000).UTC(), To: time.UnixMilli(2000).UTC(), WantChannelKey: true}
+	raw, err := json.Marshal(rangeArgs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(raw), `"want_channel_key":true`) {
+		t.Fatalf("encoded range args = %s, want want_channel_key=true", raw)
+	}
+	var decodedRangeArgs DeleteRangeSummaryArgs
+	if err := json.Unmarshal(raw, &decodedRangeArgs); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(decodedRangeArgs, rangeArgs) {
+		t.Fatalf("range args round trip = %+v, want %+v", decodedRangeArgs, rangeArgs)
+	}
+
+	rangeData := DeleteRangeSummaryData{ChannelID: "c1", ChannelKey: "mattermost/team/channel", TeamID: "t1"}
+	raw, err = json.Marshal(rangeData)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var decodedRangeData DeleteRangeSummaryData
+	if err := json.Unmarshal(raw, &decodedRangeData); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(decodedRangeData, rangeData) {
+		t.Fatalf("range data round trip = %+v, want %+v", decodedRangeData, rangeData)
+	}
+
+	var oldPreviewArgs DeletePreviewArgs
+	if err := json.Unmarshal([]byte(`{"engine":"mattermost","channel":"team/channel","post_ids":["p1"]}`), &oldPreviewArgs); err != nil {
+		t.Fatal(err)
+	}
+	if oldPreviewArgs.WantChannelKey {
+		t.Fatal("legacy preview args unexpectedly requested channel key")
+	}
+	var oldRangeArgs DeleteRangeSummaryArgs
+	if err := json.Unmarshal([]byte(`{"channel":"team/channel","from":"1970-01-01T00:00:01Z","to":"1970-01-01T00:00:02Z"}`), &oldRangeArgs); err != nil {
+		t.Fatal(err)
+	}
+	if oldRangeArgs.WantChannelKey {
+		t.Fatal("legacy range args unexpectedly requested channel key")
+	}
+	var oldPreviewData DeletePreviewData
+	if err := json.Unmarshal([]byte(`{"channel_id":"c1","requested":1,"targets":[],"requires_elevated_auth":false,"snapshot":"stable"}`), &oldPreviewData); err != nil {
+		t.Fatal(err)
+	}
+	if oldPreviewData.ChannelKey != "" {
+		t.Fatalf("legacy preview data channel key = %q, want empty", oldPreviewData.ChannelKey)
+	}
+	var oldRangeData DeleteRangeSummaryData
+	if err := json.Unmarshal([]byte(`{"channel_id":"c1","team_id":"t1","requested":1,"effective":1,"skipped_roots":0,"protected_roots":0,"include_thread_roots":false,"requires_elevated_auth":false}`), &oldRangeData); err != nil {
+		t.Fatal(err)
+	}
+	if oldRangeData.ChannelKey != "" {
+		t.Fatalf("legacy range data channel key = %q, want empty", oldRangeData.ChannelKey)
 	}
 }
 

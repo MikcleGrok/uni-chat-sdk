@@ -30,7 +30,7 @@ current value of the documented variables `GO`, `PREFIX`, `DIST`, `VERSION` and
 make setup                         # module deps and the tools the gates call
 make check                         # every local gate
 make test-acceptance               # only the process-boundary suite
-make release-check VERSION=0.1.19  # pre-tag completeness gate on this commit
+make release-check VERSION=0.1.21  # pre-tag completeness gate on this commit
 ```
 
 `make check` runs `check-env`, `check-version`, `check-onboarding`, `format`,

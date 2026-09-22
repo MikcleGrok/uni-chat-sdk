@@ -457,6 +457,7 @@ type DeletePreviewArgs struct {
 	From               time.Time `json:"from,omitempty"`
 	To                 time.Time `json:"to,omitempty"`
 	IncludeThreadRoots bool      `json:"include_thread_roots,omitempty"`
+	WantChannelKey     bool      `json:"want_channel_key,omitempty"`
 }
 
 // DeleteMaxPostIDs bounds destructive preview and batch requests at the
@@ -468,6 +469,7 @@ type DeleteRangeSummaryArgs struct {
 	From               time.Time `json:"from"`
 	To                 time.Time `json:"to"`
 	IncludeThreadRoots bool      `json:"include_thread_roots,omitempty"`
+	WantChannelKey     bool      `json:"want_channel_key,omitempty"`
 }
 
 type DeleteRangeChunkArgs struct {
@@ -482,6 +484,7 @@ type DeleteRangeChunkArgs struct {
 
 type DeleteRangeSummaryData struct {
 	ChannelID            string   `json:"channel_id"`
+	ChannelKey           string   `json:"channel_key,omitempty"`
 	TeamID               string   `json:"team_id"`
 	Requested            int      `json:"requested"`
 	Effective            int      `json:"effective"`
@@ -585,10 +588,11 @@ type deleteArgsWire struct {
 	IncludeThreadRoots bool       `json:"include_thread_roots,omitempty"`
 	ProtectedRootIDs   []string   `json:"protected_root_ids,omitempty"`
 	RangeChunk         bool       `json:"range_chunk,omitempty"`
+	WantChannelKey     bool       `json:"want_channel_key,omitempty"`
 }
 
 func (a DeletePreviewArgs) MarshalJSON() ([]byte, error) {
-	return json.Marshal(deleteArgsWire{ChannelID: a.ChannelID, Channel: a.Channel, Engine: a.Engine, PostIDs: a.PostIDs, From: optionalTime(a.From), To: optionalTime(a.To), IncludeThreadRoots: a.IncludeThreadRoots})
+	return json.Marshal(deleteArgsWire{ChannelID: a.ChannelID, Channel: a.Channel, Engine: a.Engine, PostIDs: a.PostIDs, From: optionalTime(a.From), To: optionalTime(a.To), IncludeThreadRoots: a.IncludeThreadRoots, WantChannelKey: a.WantChannelKey})
 }
 
 func (a *DeletePreviewArgs) UnmarshalJSON(data []byte) error {
@@ -596,7 +600,7 @@ func (a *DeletePreviewArgs) UnmarshalJSON(data []byte) error {
 	if err := json.Unmarshal(data, &w); err != nil {
 		return err
 	}
-	a.ChannelID, a.Channel, a.Engine, a.PostIDs, a.IncludeThreadRoots = w.ChannelID, w.Channel, w.Engine, w.PostIDs, w.IncludeThreadRoots
+	a.ChannelID, a.Channel, a.Engine, a.PostIDs, a.IncludeThreadRoots, a.WantChannelKey = w.ChannelID, w.Channel, w.Engine, w.PostIDs, w.IncludeThreadRoots, w.WantChannelKey
 	a.From, a.To = zeroTime(w.From), zeroTime(w.To)
 	return nil
 }
@@ -612,6 +616,7 @@ type DeleteTarget struct {
 
 type DeletePreviewData struct {
 	ChannelID            string         `json:"channel_id"`
+	ChannelKey           string         `json:"channel_key,omitempty"`
 	Requested            int            `json:"requested"`
 	MinTimestamp         int64          `json:"min_timestamp,omitempty"`
 	MaxTimestamp         int64          `json:"max_timestamp,omitempty"`
