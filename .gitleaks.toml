@@ -1,0 +1,38 @@
+# gitleaks config for uni-chat-sdk (08-security-and-reliability.md secrets
+# tooling: "Secrets | gitleaks или TruffleHog | отдельный `make secrets-check`").
+#
+# `[extend] useDefault = true` keeps every vendor-specific rule gitleaks ships
+# (AWS/GCP/Slack/GitHub PAT/private-key blocks/...) and adds exactly one rule
+# on top: the repository's own first threat-model asset, a Mattermost personal
+# access token (docs/security.md's "Токен доступа в Keychain"). A Mattermost
+# PAT is a 26-character lowercase alphanumeric string with NO literal prefix
+# (unlike "ghp_..." or "sk-..."), so none of gitleaks' keyword- or
+# prefix-anchored rules — including its own generic "generic-api-key" rule,
+# which requires a nearby key/token/secret keyword plus an assignment
+# operator — can ever match it. This rule instead flags any bare 26-char
+# lowercase-alnum run above a real-token entropy floor, independent of
+# surrounding context.
+[extend]
+useDefault = true
+
+[[rules]]
+id = "mattermost-personal-access-token"
+description = "Bare 26-character lowercase alphanumeric string at real-token entropy — matches a Mattermost personal access token, which carries no literal prefix and so is invisible to every prefix/keyword-anchored rule (ghp_, generic-api-key, ...)."
+regex = '''\b[a-z0-9]{26}\b'''
+entropy = 3.6
+
+# Known false positives, allowlisted by exact path or exact value — never by a
+# broad pattern, per the fix plan's own instruction.
+[allowlist]
+paths = [
+  '''(^|/)go\.sum$''',
+  '''(^|/)tools/go\.sum$''',
+  '''(^|/)coverage\.out$''',
+]
+# Test fixtures in keychain/*_test.go are short ("s3cr3t", "abc123") and never
+# match the 26-char rule above by length alone; listed here anyway as
+# defense-in-depth against a future edit that changes the fixture length.
+regexes = [
+  '''s3cr3t''',
+  '''abc123''',
+]

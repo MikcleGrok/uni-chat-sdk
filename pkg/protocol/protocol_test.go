@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net"
 	"os"
 	"path/filepath"
@@ -16,6 +17,24 @@ import (
 	"time"
 )
 
+// uniqueIDCounter backs uniqueID: an atomic counter (rather than e.g.
+// time.Now().UnixNano() alone) so two tests started in the same nanosecond
+// under t.Parallel() can never collide.
+var uniqueIDCounter int64
+
+// uniqueID returns an identifier unique to this one test invocation — this
+// process's pid plus a monotonically increasing counter — so a single value
+// can anchor every resource a parallel acceptance test creates: a socket
+// directory name (shortSocketDir below) and, for the CallStdio helper-process
+// tests, the argv marker that replaces the old shared-env-var mechanism (see
+// engineHelperMarkerFlag). 12-test-contract.md:257 requires exactly this:
+// "MUST изолироваться уникальным маркером <...>, а не общим состоянием
+// стенда."
+func uniqueID(t *testing.T) string {
+	t.Helper()
+	return fmt.Sprintf("uc-%d-%d", os.Getpid(), atomic.AddInt64(&uniqueIDCounter, 1))
+}
+
 // shortSocketDir returns a short-lived temp dir, independent of the test
 // name's length. Unlike t.TempDir() (which embeds the full subtest name),
 // this keeps the resulting socket path safely under the ~104-byte sockaddr_un
@@ -23,7 +42,7 @@ import (
 // produce a path that fails Listen with "bind: invalid argument".
 func shortSocketDir(t *testing.T) string {
 	t.Helper()
-	dir, err := os.MkdirTemp("", "uc")
+	dir, err := os.MkdirTemp("", uniqueID(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -32,6 +51,7 @@ func shortSocketDir(t *testing.T) string {
 }
 
 func TestCallRoundTrip(t *testing.T) {
+	t.Parallel()
 	sock := filepath.Join(t.TempDir(), "d.sock")
 	ln, err := Listen(sock)
 	if err != nil {
@@ -178,6 +198,7 @@ func decodedValue(value any) any {
 }
 
 func TestCallDaemonUnreachable(t *testing.T) {
+	t.Parallel()
 	sock := filepath.Join(t.TempDir(), "missing.sock")
 	_, err := Call(sock, Request{Cmd: "ping"}, time.Second)
 	if !errors.Is(err, ErrDaemonUnreachable) {
@@ -252,6 +273,7 @@ func TestSearchWireTypesRoundTrip(t *testing.T) {
 // carrying a non-empty Error, and the daemon must stay up to serve the next
 // request on the same listener.
 func TestCallHandlerPanicRecovered(t *testing.T) {
+	t.Parallel()
 	sock := filepath.Join(shortSocketDir(t), "d.sock")
 	ln, err := Listen(sock)
 	if err != nil {
@@ -312,6 +334,7 @@ func (l *flakyListener) Accept() (net.Conn, error) {
 // after a non-ErrClosed error from ln.Accept(): the loop must keep going and
 // still accept the next real connection.
 func TestServeSurvivesTransientAcceptError(t *testing.T) {
+	t.Parallel()
 	sock := filepath.Join(shortSocketDir(t), "d.sock")
 	realLn, err := Listen(sock)
 	if err != nil {
@@ -340,6 +363,7 @@ func TestServeSurvivesTransientAcceptError(t *testing.T) {
 }
 
 func TestServeReturnsBusyWhenConnectionLimitIsReached(t *testing.T) {
+	t.Parallel()
 	sock := filepath.Join(shortSocketDir(t), "d.sock")
 	ln, err := Listen(sock)
 	if err != nil {
@@ -379,7 +403,74 @@ func TestServeReturnsBusyWhenConnectionLimitIsReached(t *testing.T) {
 	wg.Wait()
 }
 
+// TestServeBusyManySimultaneousCallersAllGetGracefulResponse stresses the
+// same race TestServeReturnsBusyWhenConnectionLimitIsReached exercises with a
+// single extra caller, but with many simultaneous ones, to make a rare
+// ordering bug reproduce reliably instead of only occasionally under full
+// suite load. writeBusyResponse used to write its response and Close() the
+// connection without ever reading anything the caller sent — if the caller's
+// own Call() hadn't finished writing its request by the time that Close()
+// landed, the write failed with a raw broken-pipe/connection-reset error
+// instead of the caller ever seeing the graceful {ok:false} busy response.
+func TestServeBusyManySimultaneousCallersAllGetGracefulResponse(t *testing.T) {
+	t.Parallel()
+	sock := filepath.Join(shortSocketDir(t), "d.sock")
+	ln, err := Listen(sock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = ln.Close() }()
+	entered := make(chan struct{}, serveMaxConcurrentConnections)
+	release := make(chan struct{})
+	go Serve(ln, func(Request) Response { entered <- struct{}{}; <-release; return OK(nil) })
+	var holders sync.WaitGroup
+	for i := 0; i < serveMaxConcurrentConnections; i++ {
+		holders.Add(1)
+		go func() {
+			defer holders.Done()
+			_, _ = Call(sock, Request{Cmd: "hold"}, 5*time.Second)
+		}()
+	}
+	for i := 0; i < serveMaxConcurrentConnections; i++ {
+		select {
+		case <-entered:
+		case <-time.After(5 * time.Second):
+			t.Fatal("connection slot was not occupied")
+		}
+	}
+
+	const extraCallers = 20
+	type outcome struct {
+		resp Response
+		err  error
+	}
+	results := make(chan outcome, extraCallers)
+	var extras sync.WaitGroup
+	for i := 0; i < extraCallers; i++ {
+		extras.Add(1)
+		go func() {
+			defer extras.Done()
+			resp, err := Call(sock, Request{Cmd: "busy"}, 5*time.Second)
+			results <- outcome{resp, err}
+		}()
+	}
+	extras.Wait()
+	close(results)
+	for r := range results {
+		if r.err != nil {
+			t.Fatalf("busy caller got a raw I/O error instead of a graceful response: %v", r.err)
+		}
+		if r.resp.OK || r.resp.Error != ErrServerBusy.Error() {
+			t.Fatalf("busy response = %+v, want failed server busy response", r.resp)
+		}
+	}
+
+	close(release)
+	holders.Wait()
+}
+
 func TestServeBusyUnreadClientDoesNotBlockAcceptLoop(t *testing.T) {
+	t.Parallel()
 	sock := filepath.Join(shortSocketDir(t), "d.sock")
 	ln, err := Listen(sock)
 	if err != nil {
@@ -427,6 +518,7 @@ func TestServeBusyUnreadClientDoesNotBlockAcceptLoop(t *testing.T) {
 }
 
 func TestServeContextReturnsAfterShutdownDeadline(t *testing.T) {
+	t.Parallel()
 	sock := filepath.Join(shortSocketDir(t), "d.sock")
 	ln, err := Listen(sock)
 	if err != nil {
@@ -436,7 +528,11 @@ func TestServeContextReturnsAfterShutdownDeadline(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	go func() {
-		ServeContext(ctx, ln, func(Request) Response { close(started); time.Sleep(serveShutdownTimeout * 2); return OK(nil) })
+		ServeContext(ctx, ln, func(context.Context, Request) Response {
+			close(started)
+			time.Sleep(serveShutdownTimeout * 2)
+			return OK(nil)
+		})
 		close(done)
 	}()
 	go func() { _, _ = Call(sock, Request{Cmd: "slow"}, time.Second) }()
@@ -487,6 +583,7 @@ func (c *trackingConn) Close() error {
 }
 
 func TestServeContextRepeatedLifecycleClosesEveryAcceptedConnection(t *testing.T) {
+	t.Parallel()
 	sock := filepath.Join(shortSocketDir(t), "d.sock")
 	const cycles = 8
 	var accepted, closed atomic.Int32
@@ -499,7 +596,7 @@ func TestServeContextRepeatedLifecycleClosesEveryAcceptedConnection(t *testing.T
 		ctx, cancel := context.WithCancel(context.Background())
 		done := make(chan struct{})
 		go func() {
-			ServeContext(ctx, ln, func(Request) Response { return OK(nil) })
+			ServeContext(ctx, ln, func(context.Context, Request) Response { return OK(nil) })
 			close(done)
 		}()
 		if _, err := Call(sock, Request{Cmd: "ping"}, time.Second); err != nil {
@@ -524,6 +621,7 @@ func TestServeContextRepeatedLifecycleClosesEveryAcceptedConnection(t *testing.T
 }
 
 func TestServeContextCancellationClosesActiveConnection(t *testing.T) {
+	t.Parallel()
 	sock := filepath.Join(shortSocketDir(t), "d.sock")
 	realLn, err := Listen(sock)
 	if err != nil {
@@ -538,7 +636,7 @@ func TestServeContextCancellationClosesActiveConnection(t *testing.T) {
 	release := make(chan struct{})
 	done := make(chan struct{})
 	go func() {
-		ServeContext(ctx, ln, func(Request) Response {
+		ServeContext(ctx, ln, func(context.Context, Request) Response {
 			close(started)
 			<-release
 			return OK(nil)
@@ -577,9 +675,65 @@ func TestServeContextCancellationClosesActiveConnection(t *testing.T) {
 	}
 }
 
+// TestServeContextHandlerObservesConnectionContextCancellation proves the
+// actual point of HandlerContext: unlike a plain Handler (which has no way
+// to receive a context at all, so it necessarily keeps running in the
+// background after ServeContext returns — the bug this type exists to fix),
+// a HandlerContext that selects on ctx.Done() returns as soon as
+// ServeContext's own ctx is cancelled, well before serveShutdownTimeout —
+// which only bounds handlers that do NOT observe cancellation, as
+// TestServeContextReturnsAfterShutdownDeadline above still proves for the
+// Handler-via-WithContext compatibility path.
+func TestServeContextHandlerObservesConnectionContextCancellation(t *testing.T) {
+	t.Parallel()
+	sock := filepath.Join(shortSocketDir(t), "d.sock")
+	ln, err := Listen(sock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	started := make(chan struct{})
+	observedCancel := make(chan struct{})
+	done := make(chan struct{})
+	go func() {
+		ServeContext(ctx, ln, func(connCtx context.Context, req Request) Response {
+			close(started)
+			<-connCtx.Done()
+			close(observedCancel)
+			return OK(nil)
+		})
+		close(done)
+	}()
+	go func() { _, _ = Call(sock, Request{Cmd: "hold"}, 5*time.Second) }()
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("handler did not start")
+	}
+
+	cancelledAt := time.Now()
+	cancel()
+
+	select {
+	case <-observedCancel:
+	case <-time.After(serveShutdownTimeout):
+		t.Fatal("handler did not observe connection context cancellation before serveShutdownTimeout")
+	}
+	if elapsed := time.Since(cancelledAt); elapsed >= serveShutdownTimeout {
+		t.Fatalf("handler observed cancellation after %v, want well before serveShutdownTimeout (%v)", elapsed, serveShutdownTimeout)
+	}
+
+	select {
+	case <-done:
+	case <-time.After(serveShutdownTimeout + time.Second):
+		t.Fatal("ServeContext did not return promptly after the handler observed cancellation and returned")
+	}
+}
+
 // --- stdio transport (ядро↔адаптер) ---
 
 func TestServeStdioOneShot(t *testing.T) {
+	t.Parallel()
 	reqLine, _ := json.Marshal(Request{Cmd: "ping"})
 	var out bytes.Buffer
 	err := ServeStdio(bytes.NewReader(reqLine), &out, func(req Request) Response {
@@ -608,6 +762,7 @@ func TestServeStdioOneShot(t *testing.T) {
 }
 
 func TestServeStdioBadRequestStillReplies(t *testing.T) {
+	t.Parallel()
 	var out bytes.Buffer
 	// Not valid JSON: ServeStdio must still emit an {ok:false} Response, not error out silently.
 	if err := ServeStdio(strings.NewReader("{not json"), &out, func(Request) Response { return OK(nil) }); err != nil {
@@ -623,6 +778,7 @@ func TestServeStdioBadRequestStillReplies(t *testing.T) {
 }
 
 func TestServeStdioRejectsOversizedRequest(t *testing.T) {
+	t.Parallel()
 	var out bytes.Buffer
 	input := strings.NewReader(`{"cmd":"` + strings.Repeat("x", maxRequestJSONBytes) + `"}`)
 	if err := ServeStdio(input, &out, func(Request) Response { return OK(nil) }); err != nil {
@@ -638,6 +794,7 @@ func TestServeStdioRejectsOversizedRequest(t *testing.T) {
 }
 
 func TestServeStdioRejectsValidJSONWithOversizedTrailingData(t *testing.T) {
+	t.Parallel()
 	var out bytes.Buffer
 	called := false
 	input := strings.NewReader(`{"cmd":"ping"}` + strings.Repeat("x", maxRequestJSONBytes))
@@ -654,6 +811,7 @@ func TestServeStdioRejectsValidJSONWithOversizedTrailingData(t *testing.T) {
 }
 
 func TestServeRejectsOversizedSocketRequest(t *testing.T) {
+	t.Parallel()
 	sock := filepath.Join(shortSocketDir(t), "d.sock")
 	ln, err := Listen(sock)
 	if err != nil {
@@ -680,6 +838,7 @@ func TestServeRejectsOversizedSocketRequest(t *testing.T) {
 }
 
 func TestServeRejectsValidJSONWithOversizedSocketTrailingData(t *testing.T) {
+	t.Parallel()
 	sock := filepath.Join(shortSocketDir(t), "d.sock")
 	ln, err := Listen(sock)
 	if err != nil {
@@ -700,33 +859,113 @@ func TestServeRejectsValidJSONWithOversizedSocketTrailingData(t *testing.T) {
 	}
 }
 
-// engineHelperEnv, when "1", makes the test binary act as a fake stdio engine:
-// TestEngineHelperProcess reads one Request and writes one Response, then exits.
-// CallStdio re-spawns os.Args[0] (this test binary) pointed at that helper — the
-// stdlib os/exec "TestHelperProcess" pattern, giving a real subprocess round-trip.
-const engineHelperEnv = "UNI_CHAT_STDIO_HELPER"
+// engineHelperMarkerFlag, followed by a per-test uniqueID(t), makes the test
+// binary act as a fake stdio engine: TestEngineHelperProcess reads one
+// Request and writes one Response, then exits. CallStdio re-spawns
+// os.Args[0] (this test binary) pointed at that helper — the stdlib os/exec
+// "TestHelperProcess" pattern, giving a real subprocess round-trip.
+//
+// This used to be a shared environment variable (UNI_CHAT_STDIO_HELPER=1)
+// set via t.Setenv, which is incompatible with t.Parallel() (t.Setenv panics
+// if called after t.Parallel(), and a process-wide env var is exactly the
+// "общее состояние стенда" 12-test-contract.md:257 forbids test isolation
+// from relying on) — an argv marker carries the same signal without
+// mutating shared process state, and doubles as the unique-per-test marker
+// that rule also requires.
+// Deliberately does NOT start with "-": the re-spawned process is this same
+// test binary, so its own argv is parsed by the stdlib "flag" package (via
+// go test's flags) before our code ever sees it, and any argument starting
+// with "-" that flag does not recognize is rejected outright ("flag
+// provided but not defined: ...") rather than silently ignored. A
+// non-flag-shaped token is left alone by the parser and reaches os.Args
+// unchanged.
+const engineHelperMarkerFlag = "uc-engine-helper-marker="
+
+// helperMarkerFromArgs extracts the value passed via engineHelperMarkerFlag,
+// or "" if this process was not launched as the engine helper.
+func helperMarkerFromArgs(args []string) string {
+	for _, a := range args {
+		if strings.HasPrefix(a, engineHelperMarkerFlag) {
+			return strings.TrimPrefix(a, engineHelperMarkerFlag)
+		}
+	}
+	return ""
+}
 
 func TestEngineHelperProcess(t *testing.T) {
-	if os.Getenv(engineHelperEnv) != "1" {
+	if helperMarkerFromArgs(os.Args) == "" {
 		return // ordinary run: not the helper
 	}
 	_ = ServeStdio(os.Stdin, os.Stdout, func(req Request) Response {
-		if req.Cmd == "sleep" {
+		switch req.Cmd {
+		case "sleep":
 			time.Sleep(2 * time.Second)
 			return OK(nil)
+		case "flood-stdout":
+			// Writes far more than CallStdio's maxEngineStdoutBytes budget
+			// directly to the real stdout — bypassing ServeStdio's own
+			// single-JSON-value response entirely — and exits immediately,
+			// so the parent must treat "truncated" as its own explicit
+			// failure rather than attempting (and failing) a JSON decode of
+			// a bounded, garbage-filled prefix.
+			_, _ = os.Stdout.Write(bytes.Repeat([]byte("x"), maxEngineStdoutBytes+4096))
+			os.Exit(0)
+		case "flood-stderr":
+			// Exceeds maxEngineStderrBytes and embeds control bytes (an ANSI
+			// color escape, a newline, a bell) that a malicious or broken
+			// engine could use to forge what looks like an extra log line
+			// in whatever eventually logs CallStdio's returned error. Exits
+			// non-zero so the parent's runBoundedCommand error path — not a
+			// clean response — is what carries this stderr content back.
+			payload := append(bytes.Repeat([]byte("y"), maxEngineStderrBytes+4096), []byte("\x1b[31mFAKE-LOG-LINE\ninjected\x07")...)
+			_, _ = os.Stderr.Write(payload)
+			os.Exit(1)
+		case "ping":
+			return OK(StatusData{Running: true, LastCheck: "helper"})
 		}
-		if req.Cmd != "ping" {
-			return Fail(errors.New("unexpected cmd"))
-		}
-		return OK(StatusData{Running: true, LastCheck: "helper"})
+		return Fail(errors.New("unexpected cmd"))
 	})
 	os.Exit(0)
 }
 
+// TestCallStdioBoundsOversizedStdout proves the maxEngineStdoutBytes budget
+// (protocol.go) actually caps what CallStdio will buffer from a spawned
+// engine's stdout, and that hitting the cap produces its own explicit,
+// actionable error rather than a confusing JSON-decode failure over a
+// silently truncated response.
+func TestCallStdioBoundsOversizedStdout(t *testing.T) {
+	t.Parallel()
+	_, err := CallStdio(os.Args[0], []string{"-test.run=^TestEngineHelperProcess$", engineHelperMarkerFlag + uniqueID(t)}, Request{Cmd: "flood-stdout"}, 10*time.Second)
+	if err == nil || !strings.Contains(err.Error(), fmt.Sprintf("exceeds %d bytes", maxEngineStdoutBytes)) {
+		t.Fatalf("err = %v, want an explicit oversized-response error naming the %d byte limit", err, maxEngineStdoutBytes)
+	}
+}
+
+// TestCallStdioSanitizesOversizedStderr proves both halves of the stderr
+// hardening: the maxEngineStderrBytes budget actually truncates (with an
+// explicit marker naming the limit, not a silent cut), and every control
+// character an untrusted engine wrote — including ones chosen specifically
+// to look like a forged log line or a terminal escape sequence — is stripped
+// from the error text CallStdio returns.
+func TestCallStdioSanitizesOversizedStderr(t *testing.T) {
+	t.Parallel()
+	_, err := CallStdio(os.Args[0], []string{"-test.run=^TestEngineHelperProcess$", engineHelperMarkerFlag + uniqueID(t)}, Request{Cmd: "flood-stderr"}, 10*time.Second)
+	if err == nil {
+		t.Fatal("want an error from the engine's non-zero exit")
+	}
+	msg := err.Error()
+	if strings.ContainsAny(msg, "\x1b\n\r\x07\t") {
+		t.Fatalf("err = %q, want every control character (ANSI escape, newline, CR, bell, tab) stripped from the untrusted engine's stderr", msg)
+	}
+	if !strings.Contains(msg, fmt.Sprintf("truncated at %d bytes", maxEngineStderrBytes)) {
+		t.Fatalf("err = %q, want an explicit truncation marker naming the %d byte stderr limit", msg, maxEngineStderrBytes)
+	}
+}
+
 func TestCallStdioTimeoutKillsSlowChild(t *testing.T) {
-	t.Setenv(engineHelperEnv, "1")
+	t.Parallel()
 	started := time.Now()
-	_, err := CallStdio(os.Args[0], []string{"-test.run=^TestEngineHelperProcess$"}, Request{Cmd: "sleep"}, 20*time.Millisecond)
+	_, err := CallStdio(os.Args[0], []string{"-test.run=^TestEngineHelperProcess$", engineHelperMarkerFlag + uniqueID(t)}, Request{Cmd: "sleep"}, 20*time.Millisecond)
 	if err == nil {
 		t.Fatal("slow engine must be stopped when its bounded context expires")
 	}
@@ -739,6 +978,7 @@ func TestCallStdioTimeoutKillsSlowChild(t *testing.T) {
 }
 
 func TestServeConnectionTimeoutForKeepsSummaryBounded(t *testing.T) {
+	t.Parallel()
 	if got := serveConnectionTimeoutFor("sync"); got != 11*time.Minute {
 		t.Fatalf("sync server timeout = %v, want 11m", got)
 	}
@@ -766,6 +1006,7 @@ func TestServeConnectionTimeoutForKeepsSummaryBounded(t *testing.T) {
 }
 
 func TestServeConnectionTimeoutForStartDoesNotUseDefaultDeadline(t *testing.T) {
+	t.Parallel()
 	if deleteJobStartServeTimeout != DeleteJobStartTimeout {
 		t.Fatalf("job start timeout mismatch: socket=%v protocol=%v", deleteJobStartServeTimeout, DeleteJobStartTimeout)
 	}
@@ -781,8 +1022,8 @@ func TestServeConnectionTimeoutForStartDoesNotUseDefaultDeadline(t *testing.T) {
 }
 
 func TestCallStdioRoundTrip(t *testing.T) {
-	t.Setenv(engineHelperEnv, "1") // inherited by the spawned child, restored after this test
-	resp, err := CallStdio(os.Args[0], []string{"-test.run=^TestEngineHelperProcess$"}, Request{Cmd: "ping"}, 10*time.Second)
+	t.Parallel()
+	resp, err := CallStdio(os.Args[0], []string{"-test.run=^TestEngineHelperProcess$", engineHelperMarkerFlag + uniqueID(t)}, Request{Cmd: "ping"}, 10*time.Second)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -799,6 +1040,7 @@ func TestCallStdioRoundTrip(t *testing.T) {
 }
 
 func TestCallStdioSpawnFailure(t *testing.T) {
+	t.Parallel()
 	_, err := CallStdio("/nonexistent/engine/binary", []string{"engine-serve"}, Request{Cmd: "ping"}, 5*time.Second)
 	if err == nil {
 		t.Fatal("want an error when the engine binary cannot be spawned")
@@ -938,7 +1180,7 @@ func TestDeleteBatchJSONRoundTrip(t *testing.T) {
 }
 
 func TestDeletePreviewJSONRoundTripKeepsChannelRefSeparateFromChannelID(t *testing.T) {
-	in := DeletePreviewArgs{Engine: "mattermost", Channel: "unisender/releases", From: time.UnixMilli(1000).UTC(), To: time.UnixMilli(2000).UTC(), IncludeThreadRoots: true}
+	in := DeletePreviewArgs{Engine: "mattermost", Channel: "unisender/releases", From: time.UnixMilli(1000).UTC(), To: time.UnixMilli(2000).UTC(), IncludeThreadRoots: true, WantChannelKey: true}
 	b, err := json.Marshal(in)
 	if err != nil {
 		t.Fatal(err)
@@ -950,10 +1192,13 @@ func TestDeletePreviewJSONRoundTripKeepsChannelRefSeparateFromChannelID(t *testi
 	if !reflect.DeepEqual(out, in) || out.ChannelID != "" {
 		t.Fatalf("round trip = %+v, want channel ref without opaque channel id", out)
 	}
+	if !strings.Contains(string(b), `"want_channel_key":true`) {
+		t.Fatalf("encoded = %s, want want_channel_key=true", b)
+	}
 }
 
 func TestDeletePreviewDataJSONRoundTripKeepsRangeSafetyMetadata(t *testing.T) {
-	in := DeletePreviewData{ChannelID: "c1", Requested: 4, Targets: []DeleteTarget{{PostID: "reply"}}, SkippedRootIDs: []string{"root"}, Snapshot: "stable"}
+	in := DeletePreviewData{ChannelID: "c1", ChannelKey: "mattermost/team/channel", Requested: 4, Targets: []DeleteTarget{{PostID: "reply"}}, SkippedRootIDs: []string{"root"}, Snapshot: "stable"}
 	b, err := json.Marshal(in)
 	if err != nil {
 		t.Fatal(err)
@@ -964,6 +1209,66 @@ func TestDeletePreviewDataJSONRoundTripKeepsRangeSafetyMetadata(t *testing.T) {
 	}
 	if !reflect.DeepEqual(out, in) {
 		t.Fatalf("round trip = %+v, want %+v", out, in)
+	}
+}
+
+func TestDeleteChannelKeyWireCompatibility(t *testing.T) {
+	rangeArgs := DeleteRangeSummaryArgs{Channel: "mattermost/team/channel", From: time.UnixMilli(1000).UTC(), To: time.UnixMilli(2000).UTC(), WantChannelKey: true}
+	raw, err := json.Marshal(rangeArgs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(raw), `"want_channel_key":true`) {
+		t.Fatalf("encoded range args = %s, want want_channel_key=true", raw)
+	}
+	var decodedRangeArgs DeleteRangeSummaryArgs
+	if err := json.Unmarshal(raw, &decodedRangeArgs); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(decodedRangeArgs, rangeArgs) {
+		t.Fatalf("range args round trip = %+v, want %+v", decodedRangeArgs, rangeArgs)
+	}
+
+	rangeData := DeleteRangeSummaryData{ChannelID: "c1", ChannelKey: "mattermost/team/channel", TeamID: "t1"}
+	raw, err = json.Marshal(rangeData)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var decodedRangeData DeleteRangeSummaryData
+	if err := json.Unmarshal(raw, &decodedRangeData); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(decodedRangeData, rangeData) {
+		t.Fatalf("range data round trip = %+v, want %+v", decodedRangeData, rangeData)
+	}
+
+	var oldPreviewArgs DeletePreviewArgs
+	if err := json.Unmarshal([]byte(`{"engine":"mattermost","channel":"team/channel","post_ids":["p1"]}`), &oldPreviewArgs); err != nil {
+		t.Fatal(err)
+	}
+	if oldPreviewArgs.WantChannelKey {
+		t.Fatal("legacy preview args unexpectedly requested channel key")
+	}
+	var oldRangeArgs DeleteRangeSummaryArgs
+	if err := json.Unmarshal([]byte(`{"channel":"team/channel","from":"1970-01-01T00:00:01Z","to":"1970-01-01T00:00:02Z"}`), &oldRangeArgs); err != nil {
+		t.Fatal(err)
+	}
+	if oldRangeArgs.WantChannelKey {
+		t.Fatal("legacy range args unexpectedly requested channel key")
+	}
+	var oldPreviewData DeletePreviewData
+	if err := json.Unmarshal([]byte(`{"channel_id":"c1","requested":1,"targets":[],"requires_elevated_auth":false,"snapshot":"stable"}`), &oldPreviewData); err != nil {
+		t.Fatal(err)
+	}
+	if oldPreviewData.ChannelKey != "" {
+		t.Fatalf("legacy preview data channel key = %q, want empty", oldPreviewData.ChannelKey)
+	}
+	var oldRangeData DeleteRangeSummaryData
+	if err := json.Unmarshal([]byte(`{"channel_id":"c1","team_id":"t1","requested":1,"effective":1,"skipped_roots":0,"protected_roots":0,"include_thread_roots":false,"requires_elevated_auth":false}`), &oldRangeData); err != nil {
+		t.Fatal(err)
+	}
+	if oldRangeData.ChannelKey != "" {
+		t.Fatalf("legacy range data channel key = %q, want empty", oldRangeData.ChannelKey)
 	}
 }
 
