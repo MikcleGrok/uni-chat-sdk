@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.1.22]
+
+- Добавлена команда `get_post` (чтение одного поста по id): `protocol.GetPostArgs` (`post_id`, `channel_id`/`engine`), `protocol.GetPostData{Item CheckItem}` и capability `messages.get_post`.
+- В `PostArgs` добавлено опциональное поле `RootPostID` (`root_post_id`) — ответ в тред вместо нового сообщения верхнего уровня; при пустом значении поведение и wire-формат не меняются.
+
 ## [0.1.19]
 
 - Репозиторий приведён в соответствие с `guide-tools`: добавлены недостающие baseline Makefile targets (`setup`, `check-env`, `help`, `build`, `version`, `check-version`, `release-check`), объявлена отдельная acceptance-ступень `test-acceptance`, `check-local-tag` теперь отклоняет lightweight tag, добавлен `whats-new`.
@@ -31,6 +36,4 @@
 
 ## Unreleased
 
-- Добавлена команда `get_post` (чтение одного поста по id): `protocol.GetPostArgs` (`post_id`, `channel_id`/`engine`), `protocol.GetPostData{Item CheckItem}` и capability `messages.get_post`.
-- В `PostArgs` добавлено опциональное поле `RootPostID` (`root_post_id`) — ответ в тред вместо нового сообщения верхнего уровня; при пустом значении поведение и wire-формат не меняются.
 - Initial local extraction from `uni-chat`.
