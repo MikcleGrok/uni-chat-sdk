@@ -13,6 +13,7 @@ const (
 	MessagesSend              ID = "messages.send"
 	MessagesReact             ID = "messages.react"
 	MessagesEdit              ID = "messages.edit"
+	MessagesGetPost           ID = "messages.get_post"
 	MessagesDelete            ID = "messages.delete"
 	MessagesDeleteRange       ID = "messages.delete_range"
 	ChannelsWatch             ID = "channels.watch"
@@ -20,7 +21,7 @@ const (
 	NotificationsCheckCursors ID = "notifications.check_cursors"
 )
 
-var IDs = []ID{ChannelsList, MessagesHistory, MessagesSearch, MessagesSend, MessagesReact, MessagesEdit, MessagesDelete, MessagesDeleteRange, ChannelsWatch, NotificationsCheck, NotificationsCheckCursors}
+var IDs = []ID{ChannelsList, MessagesHistory, MessagesSearch, MessagesSend, MessagesReact, MessagesEdit, MessagesGetPost, MessagesDelete, MessagesDeleteRange, ChannelsWatch, NotificationsCheck, NotificationsCheckCursors}
 
 type Status string
 
@@ -71,7 +72,7 @@ func (e *UnavailableError) Error() string { return fmt.Sprintf("capability %s is
 func Label(id ID) string {
 	return map[ID]string{
 		ChannelsList: "List channels", MessagesHistory: "Read message history", MessagesSearch: "Search messages",
-		MessagesSend: "Send messages", MessagesReact: "React to messages", MessagesEdit: "Edit messages", MessagesDelete: "Delete messages",
+		MessagesSend: "Send messages", MessagesReact: "React to messages", MessagesEdit: "Edit messages", MessagesGetPost: "Read one message", MessagesDelete: "Delete messages",
 		MessagesDeleteRange: "Delete message ranges", ChannelsWatch: "Watch channels", NotificationsCheck: "Check notifications", NotificationsCheckCursors: "Check notifications with cursors",
 	}[id]
 }
@@ -79,7 +80,7 @@ func Label(id ID) string {
 func Action(id ID) string {
 	return map[ID]string{
 		ChannelsList: "channels.list", MessagesHistory: "messages.history", MessagesSearch: "messages.search",
-		MessagesSend: "messages.send", MessagesReact: "messages.react", MessagesEdit: "messages.edit", MessagesDelete: "messages.delete",
+		MessagesSend: "messages.send", MessagesReact: "messages.react", MessagesEdit: "messages.edit", MessagesGetPost: "messages.get_post", MessagesDelete: "messages.delete",
 		MessagesDeleteRange: "messages.delete_range", ChannelsWatch: "channels.watch", NotificationsCheck: "notifications.check", NotificationsCheckCursors: "notifications.check_cursors",
 	}[id]
 }

@@ -35,6 +35,25 @@ func TestMessagesEditIsWiredIn(t *testing.T) {
 	}
 }
 
+func TestMessagesGetPostIsWiredIn(t *testing.T) {
+	found := false
+	for _, id := range IDs {
+		if id == MessagesGetPost {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("MessagesGetPost missing from IDs = %+v", IDs)
+	}
+	if Label(MessagesGetPost) == "" {
+		t.Fatal("Label(MessagesGetPost) is empty")
+	}
+	if Action(MessagesGetPost) != "messages.get_post" {
+		t.Fatalf("Action(MessagesGetPost) = %q, want %q", Action(MessagesGetPost), "messages.get_post")
+	}
+}
+
 func TestUnavailableErrorIsTyped(t *testing.T) {
 	err := &UnavailableError{ID: MessagesSend, Status: Restricted, Reason: ReasonAPIKeyRestricted}
 	var target *UnavailableError

@@ -427,6 +427,29 @@ type EditData struct {
 	PostID    string `json:"post_id"`
 }
 
+// GetPostArgs reads one post by id. PostID alone does not say which engine owns
+// it, so the caller supplies either an engine-prefixed ChannelID or the bare
+// Engine name.
+type GetPostArgs struct {
+	ChannelID string `json:"channel_id,omitempty"`
+	Engine    string `json:"engine,omitempty"`
+	PostID    string `json:"post_id"`
+}
+
+// Validate rejects a request that names no post.
+func (a GetPostArgs) Validate() error {
+	if a.PostID == "" {
+		return errors.New("get_post: post_id is required")
+	}
+	return nil
+}
+
+// GetPostData is the "get_post" reply: the post in the same shape history and
+// check items use.
+type GetPostData struct {
+	Item CheckItem `json:"item"`
+}
+
 // DeleteArgs removes one post for the legacy TUI path. PostID alone does not
 // say which engine owns it, so the caller supplies either an engine-prefixed
 // ChannelID or the bare Engine name.

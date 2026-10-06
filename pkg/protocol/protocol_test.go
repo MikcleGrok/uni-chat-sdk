@@ -1289,6 +1289,42 @@ func TestEditRoundTrip(t *testing.T) {
 	}
 }
 
+func TestGetPostRoundTrip(t *testing.T) {
+	args := GetPostArgs{ChannelID: "mattermost/c1", PostID: "p1"}
+	b, err := json.Marshal(args)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var gotArgs GetPostArgs
+	if err := json.Unmarshal(b, &gotArgs); err != nil {
+		t.Fatal(err)
+	}
+	if gotArgs != args {
+		t.Fatalf("args round trip = %+v, want %+v", gotArgs, args)
+	}
+	data := GetPostData{Item: CheckItem{ChannelID: "c1", PostID: "p1", Sender: "alice", Message: "hi", ThreadRootID: "p0", CreatedAt: "2026-01-02T03:04:05Z"}}
+	b, err = json.Marshal(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var gotData GetPostData
+	if err := json.Unmarshal(b, &gotData); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(gotData, data) {
+		t.Fatalf("data round trip = %+v, want %+v", gotData, data)
+	}
+}
+
+func TestGetPostArgsValidateRejectsEmptyPostID(t *testing.T) {
+	if err := (GetPostArgs{Engine: "mattermost"}).Validate(); err == nil {
+		t.Fatal("Validate() = nil, want error for empty post_id")
+	}
+	if err := (GetPostArgs{Engine: "mattermost", PostID: "p1"}).Validate(); err != nil {
+		t.Fatalf("Validate() = %v, want nil", err)
+	}
+}
+
 // TestSendArgsRootPostIDIsOptionalAndRoundTrips proves a reply into a thread is
 // an additive request shape: without it the wire form is exactly the old
 // {channel_id, text}.
